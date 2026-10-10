@@ -312,53 +312,99 @@ class JinyuTVLauncher
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(520, 430);
+            ClientSize = new Size(560, 520);
             BackColor = JinyuTVLauncher.ShellBg;
             ForeColor = Color.FromArgb(229, 234, 243);
             Font = new Font("Microsoft YaHei UI", 9F);
             KeyPreview = true;
 
+            // ---- 顶部品牌区：logo 圆角块 + 产品名 + 一句话定位 ----
+            var logo = new Panel
+            {
+                Bounds = new Rectangle(32, 28, 52, 52),
+                BackColor = Color.FromArgb(88, 70, 200),
+            };
+            var logoMark = new Label
+            {
+                Text = "J",
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 24F, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Dock = DockStyle.Fill,
+            };
+            logo.Controls.Add(logoMark);
+
+            var brand = new Label
+            {
+                Text = "JinyuTV",
+                ForeColor = Color.FromArgb(240, 243, 250),
+                Font = new Font("Microsoft YaHei UI", 16F, FontStyle.Bold),
+                Bounds = new Rectangle(96, 32, 240, 26),
+            };
+
+            var brandSub = new Label
+            {
+                Text = "AI 视频创作工具",
+                ForeColor = Color.FromArgb(120, 126, 142),
+                Font = new Font("Microsoft YaHei UI", 8.5F),
+                Bounds = new Rectangle(98, 58, 240, 18),
+            };
+
             var title = new Label
             {
                 Text = "需要激活才能使用",
-                Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
                 ForeColor = Color.FromArgb(235, 238, 245),
-                Bounds = new Rectangle(28, 22, 460, 32),
+                Font = new Font("Microsoft YaHei UI", 12.5F, FontStyle.Bold),
+                Bounds = new Rectangle(32, 96, 500, 26),
             };
 
             var intro = new Label
             {
                 Text = "本软件按电脑授权，一台电脑需要一个授权码。\r\n" +
                        "把下面的机器码发给软件提供方，拿到授权码后粘贴进来即可。",
-                ForeColor = Color.FromArgb(160, 166, 180),
-                Bounds = new Rectangle(28, 60, 470, 44),
+                ForeColor = Color.FromArgb(150, 156, 172),
+                Bounds = new Rectangle(32, 126, 500, 42),
+            };
+
+            // ---- 机器码卡片 ----
+            var codeCard = new Panel
+            {
+                Bounds = new Rectangle(32, 180, 496, 76),
+                BackColor = Color.FromArgb(28, 30, 38),
+                Padding = new Padding(14, 10, 14, 10),
             };
 
             var codeLabel = new Label
             {
                 Text = "本机机器码",
-                ForeColor = Color.FromArgb(150, 156, 170),
-                Bounds = new Rectangle(28, 114, 200, 20),
+                ForeColor = Color.FromArgb(140, 146, 160),
+                Font = new Font("Microsoft YaHei UI", 8.5F),
+                Bounds = new Rectangle(14, 10, 200, 18),
             };
 
             var codeBox = new TextBox
             {
                 Text = _machine,
                 ReadOnly = true,
-                Bounds = new Rectangle(28, 136, 380, 28),
-                BackColor = Color.FromArgb(34, 34, 42),
+                Bounds = new Rectangle(14, 32, 358, 30),
+                BackColor = Color.FromArgb(22, 24, 30),
                 ForeColor = Color.FromArgb(126, 214, 160),
-                Font = new Font("Consolas", 12F),
-                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Consolas", 12.5F),
+                BorderStyle = BorderStyle.None,
+                TabStop = false,
             };
+            // 只读框仍然要能被复制：显式允许选中，否则点进去选不了。
+            codeBox.ReadOnly = true;
+            codeBox.Cursor = Cursors.IBeam;
 
             var copyBtn = new Button
             {
-                Text = "复制机器码",
-                Bounds = new Rectangle(414, 135, 82, 30),
+                Text = "复制",
+                Bounds = new Rectangle(382, 32, 96, 30),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(45, 45, 55),
-                ForeColor = Color.FromArgb(215, 220, 232),
+                BackColor = Color.FromArgb(52, 54, 66),
+                ForeColor = Color.FromArgb(220, 225, 238),
+                Font = new Font("Microsoft YaHei UI", 9F),
                 Cursor = Cursors.Hand,
                 TabStop = false,
             };
@@ -368,33 +414,48 @@ class JinyuTVLauncher
                 {
                     Clipboard.SetText(_machine);
                     copyBtn.Text = "已复制";
+                    codeBox.Focus();
+                    codeBox.SelectAll();
                     // ⚠️ 必须写全命名空间：using 里同时有 System.Threading.Timer
                     //与 System.Windows.Forms.Timer，直接写 Timer 会有歧义（编译报错 CS0104）。
                     var timer = new System.Windows.Forms.Timer { Interval = 1600 };
                     timer.Tick += delegate(object s, EventArgs e)
                     {
                         ((System.Windows.Forms.Timer)s).Stop();
-                        copyBtn.Text = "复制机器码";
+                        copyBtn.Text = "复制";
                     };
                     timer.Start();
                 }
-                catch (Exception ex) { _status.Text = "复制失败：" + ex.Message; }
+                catch (Exception ex) { SetStatus("复制失败：" + ex.Message, true); }
             };
 
+            codeCard.Controls.AddRange(new Control[] { codeLabel, codeBox, copyBtn });
+
+            // ---- 授权码输入卡片 ----
             var inputLabel = new Label
             {
                 Text = "授权码",
-                ForeColor = Color.FromArgb(150, 156, 170),
-                Bounds = new Rectangle(28, 178, 200, 20),
+                ForeColor = Color.FromArgb(140, 146, 160),
+                Font = new Font("Microsoft YaHei UI", 8.5F),
+                Bounds = new Rectangle(32, 268, 200, 18),
+            };
+
+            var hint = new Label
+            {
+                Text = "粘贴完整的一整段（两段，以英文小数点分隔）",
+                ForeColor = Color.FromArgb(105, 110, 124),
+                Font = new Font("Microsoft YaHei UI", 8F),
+                Bounds = new Rectangle(280, 269, 248, 18),
+                TextAlign = ContentAlignment.MiddleRight,
             };
 
             _input = new TextBox
             {
-                Bounds = new Rectangle(28, 200, 468, 76),
-                BackColor = Color.FromArgb(30, 30, 37),
+                Bounds = new Rectangle(32, 290, 496, 92),
+                BackColor = Color.FromArgb(22, 24, 30),
                 ForeColor = Color.FromArgb(225, 230, 240),
                 Font = new Font("Consolas", 9F),
-                BorderStyle = BorderStyle.FixedSingle,
+                BorderStyle = BorderStyle.None,
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical,
                 WordWrap = true,
@@ -403,58 +464,69 @@ class JinyuTVLauncher
             _status = new Label
             {
                 Text = _reason.Length > 0 ? ("上次激活未通过：" + _reason) : "",
-                ForeColor = _reason.Length > 0 ? Color.FromArgb(240, 140, 130) : Color.FromArgb(150, 156, 170),
-                Bounds = new Rectangle(28, 286, 468, 44),
+                ForeColor = Color.FromArgb(235, 130, 120),
+                Font = new Font("Microsoft YaHei UI", 8.5F),
+                Bounds = new Rectangle(32, 390, 496, 46),
+            };
+
+            var tip = new Label
+            {
+                Text = "授权码与本机绑定，复制到其它电脑无效。",
+                ForeColor = Color.FromArgb(108, 113, 126),
+                Font = new Font("Microsoft YaHei UI", 8.5F),
+                Bounds = new Rectangle(32, 458, 330, 30),
+                TextAlign = ContentAlignment.MiddleLeft,
             };
 
             _activate = new Button
             {
                 Text = "激活",
-                Bounds = new Rectangle(318, 348, 88, 34),
+                Bounds = new Rectangle(372, 450, 96, 36),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(38, 78, 56),
+                BackColor = Color.FromArgb(88, 70, 200),
                 ForeColor = Color.White,
-                Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold),
+                Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold),
                 Cursor = Cursors.Hand,
                 TabStop = false,
             };
             _activate.Click += delegate { TryActivate(); };
+            MakeRounded(_activate, 8);
 
             _exitButton = new Button
             {
                 Text = "退出",
-                Bounds = new Rectangle(410, 348, 86, 34),
+                Bounds = new Rectangle(478, 450, 50, 36),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(48, 48, 56),
-                ForeColor = Color.FromArgb(200, 205, 215),
+                BackColor = Color.FromArgb(44, 46, 55),
+                ForeColor = Color.FromArgb(180, 186, 200),
                 Cursor = Cursors.Hand,
                 TabStop = false,
                 DialogResult = DialogResult.Cancel,
             };
 
-            var tip = new Label
-            {
-                Text = "提示：授权码与本机绑定，复制到其它电脑无效。",
-                ForeColor = Color.FromArgb(120, 126, 140),
-                Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(28, 352, 280, 30),
-            };
-
-            Controls.AddRange(new Control[] { title, intro, codeLabel, codeBox, copyBtn,
-                                               inputLabel, _input, _status, tip, _activate, _exitButton });
+            Controls.AddRange(new Control[] { logo, brand, brandSub, title, intro,
+                                               codeCard, inputLabel, hint, _input, _status,
+                                               tip, _activate, _exitButton });
             AcceptButton = _activate;
             CancelButton = _exitButton;
             Shown += delegate { _input.Focus(); };
         }
 
-        // 命名避开 Form.Activate()（同名会触发 CS0108 警告，且语义上也不该同名）
+        /// <summary>统一的状态提示（红/绿两色，带底色的胶囊）。</summary>
+        void SetStatus(string message, bool isError)
+        {
+            _status.Text = message ?? "";
+            _status.ForeColor = isError ? Color.FromArgb(240, 130, 120) : Color.FromArgb(120, 214, 160);
+        }
+
+        // 命名避开 Form.Activate()（同名会触发 CS0108警告，且语义上也不该同名）
         void TryActivate()
         {
-            string code = (_input.Text ?? "").Trim();
+            string code = NormalizeCode(_input.Text);
             if (code.Length < 20)
             {
-                _status.ForeColor = Color.FromArgb(240, 140, 130);
-                _status.Text = "授权码看起来不完整，请把整段复制进来（通常 200 多个字符）。";
+                SetStatus("授权码看起来不完整，请把整段复制进来（通常 200 多个字符）。", true);
+                _input.Focus();
                 return;
             }
 
@@ -476,16 +548,15 @@ class JinyuTVLauncher
                     Close();
                     return;
                 }
-                _status.ForeColor = Color.FromArgb(240, 140, 130);
-                _status.Text = JsonString(result, "reason");
-                if (_status.Text.Length == 0) _status.Text = "激活失败，请确认授权码完整无误。";
-                _input.SelectAll();
+                string reason = JsonString(result, "reason");
+                if (reason.Length == 0) reason = "激活失败，请确认授权码完整无误。";
+                SetStatus(reason, true);
                 _input.Focus();
+                _input.SelectAll();
             }
             catch (Exception ex)
             {
-                _status.ForeColor = Color.FromArgb(240, 140, 130);
-                _status.Text = "激活出错：" + ex.Message;
+                SetStatus("激活出错：" + ex.Message, true);
             }
             finally
             {
@@ -494,9 +565,61 @@ class JinyuTVLauncher
             }
         }
 
+        /// <summary>
+        /// 规范化用户粘贴的授权码：**去掉所有空白字符**。
+        ///
+        /// 为什么必须做：授权码有 200+ 字符，用户常从记事本/微信粘贴，
+        /// 会带上换行与空格。此前只做了 Trim()，码里的换行被原样送进 JSON，
+        /// 轻则报「格式不正确」，重则让 bridge 解析异常后冒出
+        /// `ENOENT: no such file or directory` 这种**完全对不上原因**的报错
+        /// （用户实际遇到的就是这个）。
+        /// 另外把中文全角空格也一并清掉。
+        /// </summary>
+        static string NormalizeCode(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "";
+            var sb = new System.Text.StringBuilder(raw.Length);
+            foreach (char c in raw)
+            {
+                if (char.IsWhiteSpace(c)) continue;
+                if (c == '\u3000' || c == '\u00A0') continue;   // 全角空格 / 不换行空格
+                sb.Append(c);
+            }
+            return sb.ToString().Trim();
+        }
+
         static string EscapeJson(string value)
         {
             return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
+        }
+
+        [DllImport("gdi32.dll")]
+        static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
+        [DllImport("user32.dll")]
+        static extern int SetWindowRgn(IntPtr hwnd, IntPtr hRgn, bool redraw);
+
+        /// <summary>
+        /// 把控件裁成圆角。WinForms 的 FlatStyle.Flat 只有方角，
+        /// 想要圆角必须自己给窗口区域（HRGN）——这是桌面端少见的原生做法。
+        /// 尺寸变化时要重新应用，否则会残留旧形状。
+        /// ⚠️ 这里必须用 lambda 而不是局部函数 `void Apply() {}`：
+        ///    csc 编译 .NET 4.x 不支持局部函数语法（会报一堆 CS1519/CS1520）。
+        /// </summary>
+        static void MakeRounded(Control control, int radius)
+        {
+            Action apply = delegate
+            {
+                try
+                {
+                    if (!control.IsHandleCreated || control.Width <= 0 || control.Height <= 0) return;
+                    var region = CreateRoundRectRgn(0, 0, control.Width + 1, control.Height + 1, radius * 2, radius * 2);
+                    SetWindowRgn(control.Handle, region, true);   // 系统接管该区域的生命周期
+                }
+                catch { }
+            };
+            control.HandleCreated += delegate { apply(); };
+            control.Resize += delegate { apply(); };
+            apply();
         }
     }
 

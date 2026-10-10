@@ -247,6 +247,10 @@ async function captureFrame(command: "current" | "first" | "last") {
     // 改成 inline-flex 让容器宽度跟着子元素（视频）收缩。
     display: inline-flex;
     flex-direction: column;
+    // ⚠️ 这个下限不能删：外层 .videoContent 是 `display:grid`，
+    //    grid 子项在没有内在宽度时会塌到 0（实测视频 box 变成 0x0、整块看不见）。
+    //    原版靠 width:100% 拿到宽度；改成按内容收缩后必须由这里兜底。
+    min-width: 180px;
     max-width: 100%;
     container-type: inline-size;
     border-radius: var(--el-border-radius-base);

@@ -1,7 +1,7 @@
 <template>
   <div v-if="documentTarget" class="nodeDocumentPlaceholder" :style="canvasSize" aria-hidden="true" />
   <teleport :to="documentTarget ?? 'body'" :disabled="!documentTarget">
-  <div ref="skeletonElement" v-bind="$attrs" class="nodeSkeleton" :class="{ documentNode: documentTarget, sized }" @wheel.capture="zoomCanvas" @dblclick.stop="focusNode" @contextmenu="documentTarget && openMenu($event)">
+  <div ref="skeletonElement" v-bind="$attrs" class="nodeSkeleton" :class="{ documentNode: documentTarget }" @wheel.capture="zoomCanvas" @dblclick.stop="focusNode" @contextmenu="documentTarget && openMenu($event)">
     <el-dropdown
       ref="menu"
       trigger="contextmenu"
@@ -155,14 +155,6 @@
         </handle>
       </template>
     </div>
-    <div
-      v-if="!documentTarget"
-      class="nodeResizeHandle nodrag nopan"
-      :class="{ active: node.selected }"
-      role="separator"
-      aria-label="调整节点大小"
-      title="拖动调整节点大小"
-      @pointerdown.stop.prevent="startResize" />
   </div>
   </teleport>
 </template>
@@ -231,45 +223,6 @@ const documentContext = inject<NodeDocumentContext | undefined>("nodeDocument", 
 const documentTarget = computed(() => documentContext?.targets.get(nodeId));
 const skeletonElement = ref<HTMLElement>();
 const canvasSize = shallowRef<{ width: string; height: string }>();
-
-// ACT: 节点尺寸写入 node.style —— 画布会把它持久化进画布文件并计入撤销历史。
-// 未调整过尺寸的节点沿用样式表里的默认宽度，因此老画布不受影响。
-const RESIZE_MIN_WIDTH = 180;
-const RESIZE_MIN_HEIGHT = 96;
-const nodeStyle = computed<Record<string, unknown>>(() => {
-  const value = typeof node.style === "function" ? node.style(node) : node.style;
-  return value && typeof value === "object" ? value as Record<string, unknown> : {};
-});
-const sized = computed(() =>
-  Number.isFinite(Number.parseFloat(String(nodeStyle.value.width ?? "")))
-  || Number.isFinite(Number.parseFloat(String(nodeStyle.value.height ?? ""))));
-
-function startResize(event: PointerEvent) {
-  const element = skeletonElement.value;
-  if (!element) return;
-  // 用 viewport.zoom 换算屏幕位移（d3Zoom 在节点上下文里可能尚未就绪）。
-  const zoom = viewport.value?.zoom || 1;
-  const startWidth = element.offsetWidth;
-  const startHeight = element.offsetHeight;
-  const originX = event.clientX;
-  const originY = event.clientY;
-  const previousCursor = document.body.style.cursor;
-  document.body.style.cursor = "nwse-resize";
-  const move = (moveEvent: PointerEvent) => {
-    const width = Math.max(RESIZE_MIN_WIDTH, startWidth + (moveEvent.clientX - originX) / zoom);
-    const height = Math.max(RESIZE_MIN_HEIGHT, startHeight + (moveEvent.clientY - originY) / zoom);
-    node.style = { ...nodeStyle.value, width: `${Math.round(width)}px`, height: `${Math.round(height)}px` };
-  };
-  const finish = () => {
-    document.body.style.cursor = previousCursor;
-    window.removeEventListener("pointermove", move);
-    window.removeEventListener("pointerup", finish);
-    window.removeEventListener("pointercancel", finish);
-  };
-  window.addEventListener("pointermove", move);
-  window.addEventListener("pointerup", finish);
-  window.addEventListener("pointercancel", finish);
-}
 
 let documentLease: symbol | undefined;
 function mountDocument(target: HTMLElement) {
@@ -611,75 +564,6 @@ watch(
   width: 220px;
   color: var(--el-text-color-primary);
   text-align: left;
-
-  /* 已被手动调整过尺寸：铺满 vue-flow 节点容器，内容区自适应并可滚动。 */
-  &.sized {
-    display: flex;
-    flex-direction: column;
-    width: 100%;
-    height: 100%;
-
-    .cardContainer {
-      display: flex;
-      flex: 1;
-      flex-direction: column;
-      min-height: 0;
-
-      :deep(.contentCard) {
-        display: flex;
-        flex: 1;
-        flex-direction: column;
-        min-height: 0;
-      }
-
-      :deep(.contentCard .el-card__body) {
-        flex: 1;
-        min-height: 0;
-        overflow: auto;
-      }
-    }
-
-    /* 浮动槽（顶部工具条 / 底部提示词卡）在 sized 状态下改用**静态流式布局**。
-       默认它们是 position:absolute，定位基准是 .nodeSkeleton；
-       而 sized 把 .nodeSkeleton 拉成了固定高度，于是槽会飘到离卡片很远的地方
-       （用户报的「下方弹窗离那么远」「加号不在中间」）。
-       改成 static + order（与原版 &.documentNode 的处理完全一致），
-       槽就重新贴在卡片上下 12px，连接柄也随卡片居中。 */
-    .floatingSlot {
-      position: static;
-      width: 100% !important;
-      transform: none;
-      align-self: center;
-
-      &.topSlot { order: 0; margin-bottom: 12px; }
-      &.bottomSlot { order: 2; margin-top: 12px; }
-    }
-
-    .titleBar { order: 1; }
-    .cardContainer { order: 1; }
-  }
-
-  /* 右下角缩放手柄：默认隐藏，节点被选中或鼠标悬停时出现。
-     拖拽不会带动节点位移（nodrag/nopan）。类名避开 resizeHandle —— 那个名字被助手面板占用了。 */
-  .nodeResizeHandle {
-    position: absolute;
-    right: -4px;
-    bottom: -4px;
-    z-index: 6;
-    width: 14px;
-    height: 14px;
-    border: 1.5px solid var(--el-bg-color);
-    border-radius: 4px;
-    background: color-mix(in srgb, var(--el-color-primary) 75%, transparent);
-    cursor: nwse-resize;
-    touch-action: none;
-    opacity: 0;
-    transition: opacity 0.12s ease;
-
-    &.active { opacity: 1; }
-  }
-
-  &:hover > .nodeResizeHandle { opacity: 0.7; }
 
   &.documentNode {
     display: flex;

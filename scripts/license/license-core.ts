@@ -195,10 +195,25 @@ export async function verifyLicense(code: string, machineCode: string): Promise<
   if (!text) return { ok: false, reason: "授权码为空" };
 
   const parts = text.split(".");
-  if (parts.length !== 2) {
-    return { ok: false, reason: "授权码格式不正确（应为两段，以英文小数点分隔）" };
+  let body: string;
+  let signature: string;
+  if (parts.length === 2) {
+    // 本项目签发器的原生格式：payload.signature
+    [body, signature] = parts;
+  } else if (parts.length === 3 || parts.length === 4) {
+    //带 JOSE header 的格式：header.payload.signature（3 段）
+    // 或 header.payload.encryptedKey.signature（4 段，JWE 风格）。
+    // 无论哪种，**签名都是最后一段、payload 是倒数第二段**，
+    // 所以统一从尾部取，避免把 header 当成 payload 去JSON.parse。
+    signature = parts[parts.length - 1]!;
+    body = parts[parts.length - 2]!;
+  } else {
+    return {
+      ok: false,
+      reason: `授权码格式不正确（应为 2~4 段，以英文小数点分隔，当前 ${parts.length} 段）`,
+    };
   }
-  const [body, signature] = parts;
+  if (!body || !signature) return { ok: false, reason: "授权码内容不完整，请确认复制了整段" };
 
   let payload: LicensePayload;
   try {
