@@ -307,37 +307,52 @@ class JinyuTVLauncher
             _machine = machine ?? "";
             _reason = reason ?? "";
 
+            // ---- 配色全部取自软件自身：主色读 settings.json，其余与 ShellBg 同族----
+        Color bg = JinyuTVLauncher.ShellBg;                  // #17171A，与软件外壳同色
+        Color accent = HexToColor(ReadPrimaryColor());      // 用户设置里的主色（默认近黑 #171717）
+        Color accentSolid = AccentFor(accent, bg);           // 主色提亮到「看得见」的版本
+        Color onAccent = ReadableOn(accentSolid);            // 按钮上的可读文字
+        Color surface = Color.FromArgb(0x21, 0x21, 0x26);    // 卡片面：比底色略亮
+        Color surfaceHi = Color.FromArgb(0x2B, 0x2B, 0x32);  // 按钮/输入面
+        Color border = Color.FromArgb(0x3A, 0x3A, 0x44);
+        Color textHi = Color.FromArgb(0xEC, 0xEC, 0xF0);
+        Color textMid = Color.FromArgb(0x9A, 0x9A, 0xA6);
+        Color textDim = Color.FromArgb(0x6E, 0x6E, 0x7A);
+        Color danger = Color.FromArgb(0xE8, 0x7C, 0x74);
+        Color ok = Color.FromArgb(0x6C, 0xC7, 0x9A);
+
             Text = "JinyuTV 激活";
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
+            FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(560, 520);
-            BackColor = JinyuTVLauncher.ShellBg;
-            ForeColor = Color.FromArgb(229, 234, 243);
+            ClientSize = new Size(560, 540);
+            BackColor = bg;
+            ForeColor = textHi;
             Font = new Font("Microsoft YaHei UI", 9F);
             KeyPreview = true;
 
-            // ---- 顶部品牌区：logo 圆角块 + 产品名 + 一句话定位 ----
+            // ---- 顶部品牌区：主色圆角块 + 产品名 + 一句话定位 ----
             var logo = new Panel
             {
                 Bounds = new Rectangle(32, 28, 52, 52),
-                BackColor = Color.FromArgb(88, 70, 200),
+                BackColor = accentSolid,
             };
             var logoMark = new Label
             {
                 Text = "J",
-                ForeColor = Color.White,
+                ForeColor = onAccent,
                 Font = new Font("Microsoft YaHei UI", 24F, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Fill,
             };
             logo.Controls.Add(logoMark);
+            MakeRounded(logo, 12);
 
             var brand = new Label
             {
                 Text = "JinyuTV",
-                ForeColor = Color.FromArgb(240, 243, 250),
+                ForeColor = textHi,
                 Font = new Font("Microsoft YaHei UI", 16F, FontStyle.Bold),
                 Bounds = new Rectangle(96, 32, 240, 26),
             };
@@ -345,7 +360,7 @@ class JinyuTVLauncher
             var brandSub = new Label
             {
                 Text = "AI 视频创作工具",
-                ForeColor = Color.FromArgb(120, 126, 142),
+                ForeColor = textDim,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
                 Bounds = new Rectangle(98, 58, 240, 18),
             };
@@ -353,7 +368,7 @@ class JinyuTVLauncher
             var title = new Label
             {
                 Text = "需要激活才能使用",
-                ForeColor = Color.FromArgb(235, 238, 245),
+                ForeColor = textHi,
                 Font = new Font("Microsoft YaHei UI", 12.5F, FontStyle.Bold),
                 Bounds = new Rectangle(32, 96, 500, 26),
             };
@@ -362,7 +377,7 @@ class JinyuTVLauncher
             {
                 Text = "本软件按电脑授权，一台电脑需要一个授权码。\r\n" +
                        "把下面的机器码发给软件提供方，拿到授权码后粘贴进来即可。",
-                ForeColor = Color.FromArgb(150, 156, 172),
+                ForeColor = textMid,
                 Bounds = new Rectangle(32, 126, 500, 42),
             };
 
@@ -370,14 +385,14 @@ class JinyuTVLauncher
             var codeCard = new Panel
             {
                 Bounds = new Rectangle(32, 180, 496, 76),
-                BackColor = Color.FromArgb(28, 30, 38),
+                BackColor = surface,
                 Padding = new Padding(14, 10, 14, 10),
             };
 
             var codeLabel = new Label
             {
                 Text = "本机机器码",
-                ForeColor = Color.FromArgb(140, 146, 160),
+                ForeColor = textMid,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
                 Bounds = new Rectangle(14, 10, 200, 18),
             };
@@ -387,8 +402,8 @@ class JinyuTVLauncher
                 Text = _machine,
                 ReadOnly = true,
                 Bounds = new Rectangle(14, 32, 358, 30),
-                BackColor = Color.FromArgb(22, 24, 30),
-                ForeColor = Color.FromArgb(126, 214, 160),
+                BackColor = bg,
+                ForeColor = ok,
                 Font = new Font("Consolas", 12.5F),
                 BorderStyle = BorderStyle.None,
                 TabStop = false,
@@ -402,8 +417,8 @@ class JinyuTVLauncher
                 Text = "复制",
                 Bounds = new Rectangle(382, 32, 96, 30),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(52, 54, 66),
-                ForeColor = Color.FromArgb(220, 225, 238),
+                BackColor = surfaceHi,
+                ForeColor = textHi,
                 Font = new Font("Microsoft YaHei UI", 9F),
                 Cursor = Cursors.Hand,
                 TabStop = false,
@@ -430,12 +445,13 @@ class JinyuTVLauncher
             };
 
             codeCard.Controls.AddRange(new Control[] { codeLabel, codeBox, copyBtn });
+            MakeRounded(codeCard, 10);
 
             // ---- 授权码输入卡片 ----
             var inputLabel = new Label
             {
                 Text = "授权码",
-                ForeColor = Color.FromArgb(140, 146, 160),
+                ForeColor = textMid,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
                 Bounds = new Rectangle(32, 268, 200, 18),
             };
@@ -443,7 +459,7 @@ class JinyuTVLauncher
             var hint = new Label
             {
                 Text = "粘贴完整的一整段（两段，以英文小数点分隔）",
-                ForeColor = Color.FromArgb(105, 110, 124),
+                ForeColor = textDim,
                 Font = new Font("Microsoft YaHei UI", 8F),
                 Bounds = new Rectangle(280, 269, 248, 18),
                 TextAlign = ContentAlignment.MiddleRight,
@@ -452,8 +468,8 @@ class JinyuTVLauncher
             _input = new TextBox
             {
                 Bounds = new Rectangle(32, 290, 496, 92),
-                BackColor = Color.FromArgb(22, 24, 30),
-                ForeColor = Color.FromArgb(225, 230, 240),
+                BackColor = bg,
+                ForeColor = textHi,
                 Font = new Font("Consolas", 9F),
                 BorderStyle = BorderStyle.None,
                 Multiline = true,
@@ -464,7 +480,7 @@ class JinyuTVLauncher
             _status = new Label
             {
                 Text = _reason.Length > 0 ? ("上次激活未通过：" + _reason) : "",
-                ForeColor = Color.FromArgb(235, 130, 120),
+                ForeColor = danger,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
                 Bounds = new Rectangle(32, 390, 496, 46),
             };
@@ -472,7 +488,7 @@ class JinyuTVLauncher
             var tip = new Label
             {
                 Text = "授权码与本机绑定，复制到其它电脑无效。",
-                ForeColor = Color.FromArgb(108, 113, 126),
+                ForeColor = textDim,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
                 Bounds = new Rectangle(32, 458, 330, 30),
                 TextAlign = ContentAlignment.MiddleLeft,
@@ -483,8 +499,8 @@ class JinyuTVLauncher
                 Text = "激活",
                 Bounds = new Rectangle(372, 450, 96, 36),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(88, 70, 200),
-                ForeColor = Color.White,
+                BackColor = accentSolid,
+                ForeColor = onAccent,
                 Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold),
                 Cursor = Cursors.Hand,
                 TabStop = false,
@@ -497,8 +513,8 @@ class JinyuTVLauncher
                 Text = "退出",
                 Bounds = new Rectangle(478, 450, 50, 36),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(44, 46, 55),
-                ForeColor = Color.FromArgb(180, 186, 200),
+                BackColor = surfaceHi,
+                ForeColor = textMid,
                 Cursor = Cursors.Hand,
                 TabStop = false,
                 DialogResult = DialogResult.Cancel,
@@ -886,6 +902,101 @@ class JinyuTVLauncher
     //   所以把上次判定出的主题落盘，窗口一创建就按它上色，启动全程颜色一致。
 
     static string ThemeFile { get { return Path.Combine(BaseDir, "data", "ui-theme.txt"); } }
+
+    /// <summary>
+    /// 读取软件当前的主色（settings.json → ui.primaryColor），十六进制字符串。
+    ///
+    /// 为什么授权窗口要读它：主色是**用户在设置里可改的**，默认近黑 #171717。
+    /// 激活窗口若写死一个紫色按钮，配色就和主界面完全对不上 —— 用户抱怨
+    /// 「跟软件界面一点都不搭」正是这个原因。
+    /// 读不到就回退到与默认主色协调的深灰，避免弹窗变花。
+    /// </summary>
+    static string ReadPrimaryColor()
+    {
+        try
+        {
+            string file = Path.Combine(BaseDir, "data", "settings.json");
+            if (!File.Exists(file)) return "#3A3A3E";
+            string raw = File.ReadAllText(file, Encoding.UTF8);
+            // 用正则取primaryColor 的值；不引入 JSON 库（C# 侧保持零依赖）。
+            var match = Regex.Match(raw, "\"primaryColor\"\\s*:\\s*\"(#[0-9a-fA-F]{3,8})\"");
+            if (!match.Success) return "#3A3A3E";
+            string hex = match.Groups[1].Value;
+            //#171717 → 展开成 #RRGGBB，便于取色
+            if (hex.Length == 4)
+            {
+                {
+                    var sb = new StringBuilder(7);
+                    sb.Append('#');
+                    for (int i = 1; i <= 3; i++) { sb.Append(hex[i]); sb.Append(hex[i]); }
+                    hex = sb.ToString();
+                }
+            }
+            if (hex.Length == 9) hex = hex.Substring(0, 7);
+            return hex;
+        }
+        catch { return "#3A3A3E"; }
+    }
+
+    /// <summary>按主色的亮度决定按钮上的文字用黑还是白 —— 与前端 readableBrand 同一套逻辑。</summary>
+    static Color ReadableOn(Color background)
+    {
+        double luminance = (0.299 * background.R + 0.587 * background.G + 0.114 * background.B) / 255.0;
+        return luminance > 0.6 ? Color.FromArgb(0x1B, 0x1B, 0x1F) : Color.White;
+    }
+
+    /// <summary>
+    /// 把主色调成「在当前底色上看得见、且能承载按钮文字」的颜色。
+    ///
+    /// 为什么必须调：软件默认主色是**近黑 #171717**，而外壳底色也是 #17171A ——
+    /// 直接拿主色当按钮底色，对比度只有 **1.00**，按钮会整个「消失」在背景里。
+    /// （这与项目里反复出现的「主色近黑 → 选中态糊成黑块」是同一个根因。）
+    ///
+    /// 目标值选0.45 的中灰（实测是「两个方向都达标」的甜点）：
+    /// 与深色底 (23,23,26) 对比 **3.77:1**（≥3 醒目），
+    /// 白字压在上面对比 **4.74:1**（≥4.5 可读）。
+    /// 再亮（0.50+）白字就看不见，再暗（0.40-）按钮又会糊进背景。
+    /// </summary>
+    static Color AccentFor(Color accent, Color background)
+    {
+        double b = (0.299 * background.R + 0.587 * background.G + 0.114 * background.B) / 255.0;
+        const double target = 0.45;
+        // 按主色与白色的插值比例，把相对亮度调到 target。
+        // 主色越暗插得越多；已经够亮就原样用。
+        double whiteL = 1.0;
+        if (whiteL <= b) return accent;
+        double a = (0.299 * accent.R + 0.587 * accent.G + 0.114 * accent.B) / 255.0;
+        if (a >= target) return accent;
+        double t = (target - b) / (whiteL - b);
+        Func<double, int> mix = delegate(double channel)
+        {
+            double v = channel + (255 - channel) * t;
+            return (int)Math.Round(v > 255 ? 255 : v);
+        };
+        return Color.FromArgb(mix(accent.R), mix(accent.G), mix(accent.B));
+    }
+
+    /// <summary>#RRGGBB / #RGB → Color。解析失败回退到中性深灰。</summary>
+    static Color HexToColor(string hex)
+    {
+        try
+        {
+            string h = (hex ?? "").Trim().TrimStart('#');
+            if (h.Length == 3)
+            {
+                // #RGB → #RRGGBB。用 StringBuilder 避免 char 相加得到 int。
+                var sb = new StringBuilder(6);
+                for (int i = 0; i < 3; i++) { sb.Append(h[i]); sb.Append(h[i]); }
+                h = sb.ToString();
+            }
+            if (h.Length < 6) return Color.FromArgb(0x3A, 0x3A, 0x3E);
+            return Color.FromArgb(
+                Convert.ToInt32(h.Substring(0, 2), 16),
+                Convert.ToInt32(h.Substring(2, 2), 16),
+                Convert.ToInt32(h.Substring(4, 2), 16));
+        }
+        catch { return Color.FromArgb(0x3A, 0x3A, 0x3E); }
+    }
 
     /// <summary>读取上次的主题（"dark" / "light"）。没有记录时按软件默认的深色。</summary>
     public static string ReadLastTheme()
