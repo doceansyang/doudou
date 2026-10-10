@@ -211,6 +211,11 @@ function resetForm() {
 
 async function fetchModels() {
   if (fetching.value || !(await providerForm.value?.validateField("apiUrl").catch(() => false))) return;
+  // 密钥没填就别发请求：否则服务端只能回一个 401，用户会误以为是地址/协议填错。
+  if (!form.apiKey.trim()) {
+    formError.value = "请先填写 API 密钥，再获取模型列表";
+    return;
+  }
   fetching.value = true;
   formError.value = "";
   const controller = new AbortController();
