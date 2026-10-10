@@ -241,44 +241,26 @@ async function captureFrame(command: "current" | "first" | "last") {
 
 <style scoped lang="scss">
 .videoPlayer {
-    position: relative;
-    // 不再写死 width:100%：视频改为按高度自适应宽度后，
-    // 容器若仍铺满节点宽度，竖屏视频两侧又会露出节点底色（换一种留白）。
-    // 改成 inline-flex 让容器宽度跟着子元素（视频）收缩。
-    display: inline-flex;
-    flex-direction: column;
-    // ⚠️ 这个下限不能删：外层 .videoContent 是 `display:grid`，
-    //    grid 子项在没有内在宽度时会塌到 0（实测视频 box 变成 0x0、整块看不见）。
-    //    原版靠 width:100% 拿到宽度；改成按内容收缩后必须由这里兜底。
-    min-width: 180px;
-    max-width: 100%;
-    container-type: inline-size;
-    border-radius: var(--el-border-radius-base);
-    background: var(--el-fill-color-darker);
-    cursor: grab;
+  position: relative;
+  width: 100%;
+  min-width: 180px;
+  container-type: inline-size;
+  border-radius: var(--el-border-radius-base);
+  background: var(--el-fill-color-darker);
+  cursor: grab;
 
   &:active { cursor: grabbing; }
   .videoPreview {
     display: block;
-    // 竖屏（9:16）不能铺满宽度：那样高度会远超max-height，被压回来后
-    // object-fit:contain 会在**左右**留出黑边（用户报的「9:16 两边留白」，
-    // 实测 720x1280 的视频在 111x148 的盒子里左右各空14px）。
-    // 改成「按高度撑满、宽度自适应」：max-height 仍是上限，
-    // 横屏时宽度自然填满容器（height 由比例算出），竖屏时宽度自动收窄 —— 任何比例都不留白。
-    width: auto;
-    max-width: 100%;
+    width: 100%;
     max-height: 240px;
-    margin: 0 auto;   // 居中，避免窄视频贴左
     object-fit: contain;
     border-radius: var(--el-border-radius-base);
     pointer-events: none;
 
     &:fullscreen {
-      width: auto;
-      max-width: none;
       height: 100%;
       max-height: none;
-      margin: 0 auto;
       border-radius: 0;
       background: #000;
       pointer-events: auto;
