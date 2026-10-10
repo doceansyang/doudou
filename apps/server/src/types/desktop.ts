@@ -16,6 +16,10 @@ export type updateSnapshot = {
   hash: string;
   latestVersion: string;
   latestHash: string;
+  /** 发布清单里的更新说明（可为空） */
+  notes: string;
+  /** 安装包直链（来自发布清单）；「检测 + 一键下载」用它，而不是应用内自更新 */
+  downloadUrl: string;
   error: string;
   updateAvailable: boolean;
   updateReady: boolean;
@@ -45,7 +49,7 @@ export interface DesktopRuntime {
   openDevTools(): void;
   updater: {
     getLocalInfo(): Promise<{ version: string; channel: string; hash: string; baseUrl: string }>;
-    updateInfo(): { version?: string; hash?: string; error?: string; installError?: string; updateAvailable?: boolean; updateReady?: boolean } | undefined;
+    updateInfo(): { version?: string; hash?: string; error?: string; installError?: string; updateAvailable?: boolean; updateReady?: boolean; downloadUrl?: string; notes?: string } | undefined;
     checkForUpdate(): Promise<{ error?: string }>;
     confirmStartup?(failed?: boolean): void | Promise<void>;
     downloadUpdate?(): Promise<void>;

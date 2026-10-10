@@ -2,11 +2,21 @@ import { basename } from "node:path";
 import { file } from "@toonflow/file/bun";
 import type { Request } from "express";
 import conf from "@/utils/conf";
+import { resolveDesktopRuntime } from "@/lib/desktop";
 import type { DesktopRuntime, desktopUpdateAttempt, updateSnapshot } from "@/types/desktop";
 
+const RELEASE_BASE = "https://github.com/doceansyang/doudou/releases/latest/download";
+/**
+ * 更新源。
+ *   · 上游的「官方源」是 Linke 网关（api.linke.link/web/version/desktopUpdates），
+ *     返回的是**他们自己产品**的版本 —— 对我们来说是错的（会提示更新到别人的版本），
+ *     所以这里把它改成我们自己的发布页。
+ *   · 「GitHub」保持同一地址，避免历史配置指向别处。
+ * 清单固定叫 latest.json：`…/releases/latest/download/latest.json` 永远解析到最新一次发布的资产。
+ */
 const updateBaseUrls = {
-  official: "https://api.linke.link/web/version/desktopUpdates",
-  github: "https://github.com/HBAI-Ltd/Toonflow-app/releases/latest/download",
+  official: RELEASE_BASE,
+  github: RELEASE_BASE,
 };
 const updateRuntimeId = crypto.randomUUID();
 let cancelledUpdateAttempt: string | undefined;
@@ -113,7 +123,10 @@ function getDesktopState(req: Request): DesktopState {
 }
 
 export function getDesktopRuntime(req: Request): DesktopRuntime {
-  return req.app.locals.desktop;
+  const runtime = resolveDesktopRuntime(req);
+  // 走到这里说明中间件已经放行过；真取不到就是配置/环境不对，给明确错误而不是静默崩。
+  if (!runtime) throw Object.assign(new Error("此接口仅在桌面客户端中可用"), { status: 404 });
+  return runtime;
 }
 
 export async function selectProviderFile(req: Request) {
@@ -152,6 +165,9 @@ export async function getDesktopUpdate(req: Request): Promise<updateSnapshot> {
     version, channel, hash,
     latestVersion: validUpdate ? update?.version || "" : "",
     latestHash: validUpdate ? update?.hash || "" : "",
+    // 更新说明与安装包直链来自发布清单（latest.json）——「检测 + 一键下载」用得到。
+    downloadUrl: validUpdate ? update?.downloadUrl || "" : "",
+    notes: validUpdate ? update?.notes || "" : "",
     error,
     installFailure,
     updateAvailable: !installFailure && validUpdate && (update?.updateAvailable ?? false),

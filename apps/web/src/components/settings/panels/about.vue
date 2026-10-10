@@ -153,6 +153,7 @@
             <el-tag v-if="snapshot.channel" type="info" size="small" round>{{ snapshot.channel }}</el-tag>
             <code v-if="snapshot.latestHash" :title="snapshot.latestHash">{{ snapshot.latestHash }}</code>
           </div>
+          <p v-if="snapshot.notes" class="releaseNotes">{{ snapshot.notes }}</p>
         </div>
       </div>
       <template #footer>
@@ -166,6 +167,18 @@
           :loading="working"
           @click="runUpdate(snapshot.updateReady ? 'apply' : 'download')">
           {{ snapshot.updateReady ? "重启并更新" : "下载更新" }}
+        </el-button>
+        <!-- 我们的外壳不做应用内自更新（安装由 NSIS 安装包负责），
+             所以检测到新版本时直接给安装包直链，一键下载。 -->
+        <el-button
+          v-else-if="snapshot?.updateAvailable && snapshot.downloadUrl"
+          tag="a"
+          type="primary"
+          size="small"
+          :href="snapshot.downloadUrl"
+          target="_blank"
+          rel="noopener noreferrer">
+          下载安装包
         </el-button>
       </template>
     </el-dialog>
@@ -203,12 +216,13 @@ import {
   desktopUpdateError as updateError,
   desktopUpdateAction as action,
   desktopUpdateChecking,
+  desktopUpdateSupported,
   hasDesktopUpdate,
+  probeDesktopUpdateSupport,
   runDesktopUpdate,
 } from "@/stores/desktopUpdate";
 
 const messageMarkdown = defineAsyncComponent(() => import("@/components/messageMarkdown.vue"));
-const isDesktop = new URLSearchParams(window.location.search).get("desktop") === "1";
 const currentVersion = computed(() => snapshot.value?.version || import.meta.env.appVersion);
 const sourceSaving = ref(false);
 const checking = computed(() => desktopUpdateChecking.value);
@@ -253,7 +267,7 @@ onMounted(async () => {
 });
 
 onMounted(async () => {
-  if (!isDesktop) return;
+  if (!(await probeDesktopUpdateSupport())) return;
   try {
     await runDesktopUpdate("read");
   } catch {
@@ -298,7 +312,8 @@ function getUpdateError(error: unknown) {
 async function runUpdate(nextAction: "read" | "check" | "download" | "apply") {
   if (working.value || sourceSaving.value) return;
   updateError.value = "";
-  if (!isDesktop) {
+  // 由服务端能力决定能不能检查更新（而不是 `?desktop=1`，见 stores/desktopUpdate.ts）。
+  if (!desktopUpdateSupported.value && !(await probeDesktopUpdateSupport())) {
     updateError.value = "请在桌面客户端中检查更新。";
     return;
   }
@@ -685,6 +700,16 @@ async function runUpdate(nextAction: "read" | "check" | "download" | "apply") {
       code {
         overflow-wrap: anywhere;
       }
+    }
+
+    /* 更新说明（来自发布清单的 notes），可能有好几行。 */
+    .releaseNotes {
+      margin: 12px 0 0;
+      color: var(--el-text-color-regular);
+      font-size: 13px;
+      line-height: 1.7;
+      white-space: pre-line;
+      overflow-wrap: anywhere;
     }
   }
 }

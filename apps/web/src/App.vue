@@ -54,7 +54,7 @@ import { locale } from "@toonflow/i18n/vue";
 import type { updateSnapshot } from "@toonflow/server/desktop";
 import { chatLocale } from "@/lib/i18n";
 import { saveSettings, settings, uiSettings } from "@/stores/settings";
-import { desktopUpdateSnapshot, stopDesktopUpdateObservation } from "@/stores/desktopUpdate";
+import { desktopUpdateSnapshot, desktopUpdateSupported, probeDesktopUpdateSupport, runDesktopUpdate, stopDesktopUpdateObservation } from "@/stores/desktopUpdate";
 import { useMcpControl } from "@/lib/mcpControl";
 import ffmpegRequired from "@/components/settings/ffmpegRequired.vue";
 import updateBox from "@/components/updateBox.vue";
@@ -74,13 +74,19 @@ const tdesignLocale = computed(() => ({ ...tdesignLocales[locale.value], chat: c
 const updateBoxVisible = ref(false);
 const updateBoxBuild = shallowRef<{ version: string; hash: string }>();
 const shownUpdateBuilds = new Set<string>();
-const isDesktop = new URLSearchParams(window.location.search).get("desktop") === "1";
 const installFailureVisible = ref(false);
 const installFailure = shallowRef<updateSnapshot["installFailure"]>();
 const shownInstallAttempts = new Set<string>();
 
+// 启动时探一次「服务端是否支持检查更新」，支持的话再读一次已知状态
+// （read 只读服务端已有状态、不联网），这样上次已发现的新版本能立刻在设置按钮上亮红点。
+probeDesktopUpdateSupport().then((supported) => {
+  if (supported) void runDesktopUpdate("read").catch(() => undefined);
+});
+
 watch(desktopUpdateSnapshot, snapshot => {
-  if (!isDesktop || !snapshot) return;
+  // 不做「检查更新」的部署（纯浏览器）不该弹更新提示 —— 由服务端探测决定，见 store。
+  if (!desktopUpdateSupported.value || !snapshot) return;
   if (snapshot.installFailure) {
     installFailure.value = snapshot.installFailure;
     updateBoxVisible.value = false;

@@ -12,6 +12,7 @@
   python scripts/dev-update.py --only web      # 只重建某个包（tools/ext/nodes/web/mcp/server）
 """
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -23,6 +24,15 @@ PROJECT = "C:/Users/JinYuDream/WorkBuddy/豆包画布开发/toonflow"
 SOFTWARE = "C:/Users/JinYuDream/WorkBuddy/豆包画布开发/JinyuTV-portable"
 BUN = "C:/Users/JinYuDream/.workbuddy/tools/bun/bun.exe"
 LAUNCHER_EXE = "JinyuTV.exe"
+
+
+def read_version(pkg_path):
+    """读 package.json 的版本号（只用于打印，读不到就给个占位）。"""
+    try:
+        with open(pkg_path, encoding="utf-8") as handle:
+            return json.load(handle).get("version", "?")
+    except Exception:
+        return "?"
 
 SKIP_DIR_SUFFIX = (".bak", ".prebuild", ".manual", ".empty")
 
@@ -94,6 +104,13 @@ def build(only=None):
 def sync():
     """把项目产物同步到软件目录。data/ 只在软件目录不存在时复制，避免覆盖登录态。"""
     total = 0
+    # 根文件：package.json 必须同步 —— 服务端「检查更新」靠它知道自己是哪个版本，
+    # 不同步的话软件会一直以为自己还是旧版（永远检测不到更新）。
+    for name in ["package.json"]:
+        src = os.path.join(PROJECT, name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(SOFTWARE, name))
+            print("--- 已同步 %s（版本 %s）" % (name, read_version(src)))
     for name in ["build", "scripts"]:
         src = os.path.join(PROJECT, name)
         dst = os.path.join(SOFTWARE, name)

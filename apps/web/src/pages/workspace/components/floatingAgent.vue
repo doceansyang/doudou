@@ -178,8 +178,21 @@ function stopInteraction(event?: PointerEvent) {
 
 function resizeViewport() {
   stopInteraction();
+  // 悬浮模式下 left/top 是**像素值**，窗口尺寸一变，面板就会停在原地：
+  // 小窗口时它贴着右边（看着正常），一旦最大化就变成了"飘在中间"。
+  // 所以先记下「距右/下边缘的距离」这个锚点，尺寸变了按锚点还原 ——
+  // 原本贴右的会继续贴右，用户拖到中间的位置也保持原来的相对关系。
+  const anchorRight = viewport.width - (left.value + width.value);
+  const anchorBottom = viewport.height - (top.value + height.value);
+
   viewport.width = window.innerWidth;
   viewport.height = window.innerHeight;
+
+  if (docked.value) return;
+  // 宽度可能被 maxWidth 压缩（窗口变窄），所以用更新后的 width 还原
+  left.value = viewport.width - width.value - anchorRight;
+  top.value = viewport.height - height.value - anchorBottom;
+  movePanel(left.value, top.value);
 }
 
 watch([visible, docked], () => stopInteraction());

@@ -25,6 +25,7 @@
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -49,7 +50,23 @@ WV2_FILES = [
     "WebView2Loader.dll",
 ]
 NSI = os.path.join(SCRIPTS, "installer.nsi")
-OUT_SETUP = os.path.join(BASE, "JinyuTV-2.0.0-Setup.exe")
+
+
+def read_version():
+    """版本号的唯一来源：仓库根的 package.json（scripts/release.py 负责改它）。
+
+    服务端「检查更新」也读安装目录里的 package.json 来知道自己是哪个版本，
+    所以这个值必须一路走到发行包里，不能在这里另写一份。
+    """
+    with open(os.path.join(PROJECT, "package.json"), encoding="utf-8") as handle:
+        version = json.load(handle).get("version", "").strip()
+    if not re.match(r"^\d+\.\d+\.\d+$", version):
+        raise SystemExit("package.json 里的 version 不合法：%r（应形如 2.0.0）" % version)
+    return version
+
+
+VERSION = read_version()
+OUT_SETUP = os.path.join(BASE, "JinyuTV-%s-Setup.exe" % VERSION)
 
 # 运行期真正需要的 RPA 文件（服务端会按 <安装目录>/scripts/doubao-rpa-service.ts 拉起）
 RPA_SCRIPTS = ["doubao-rpa-service.ts", "doubao-rpa-core.ts", "doubao-accounts.ts"]
@@ -235,6 +252,11 @@ def main():
     print("--- 停止正在运行的软件（释放被占用的文件）")
     stop_services()
 
+    # 0) 版本号落到绿色版根目录：服务端「检查更新」读的就是这里的 package.json。
+    #    不覆盖这一份的话，装出来的软件会永远以为自己还是旧版本。
+    shutil.copy2(os.path.join(PROJECT, "package.json"), os.path.join(SOFTWARE, "package.json"))
+    print("--- 版本：%s（已同步 package.json 到绿色版）" % VERSION)
+
     # 1) 编译启动器（同时放进绿色版与暂存目录）——走 compile-launcher.py，
     #    它会一并铺好 WebView2 的三支依赖，避免这里重复维护引用参数
     run("编译启动器 JinyuTV.exe（内嵌 WebView2 窗口）",
@@ -244,8 +266,8 @@ def main():
     # 2) 组装净化后的发行目录
     stage = build_stage()
 
-    # 3) 编译安装包（用净化目录作为源）
-    run("编译安装包", [MAKENSIS, "/INPUTCHARSET", "UTF8",
+    # 3) 编译安装包（用净化目录作为源；版本号传进 NSIS，安装包文件名与卸载项都靠它）
+    run("编译安装包", [MAKENSIS, "/INPUTCHARSET", "UTF8", "/DAPP_VERSION=" + VERSION,
                        "/DSOURCE_DIR=" + stage.replace("\\", "/"), NSI], cwd=SCRIPTS)
     if os.path.exists(OUT_SETUP):
         print("\n===== 完成 =====")

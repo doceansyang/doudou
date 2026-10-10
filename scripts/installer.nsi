@@ -8,8 +8,14 @@
 
 Unicode true
 
+; 版本号：由 build-installer.py 用 /DAPP_VERSION=<x.y.z> 传进来，
+; 唯一来源是仓库根的 package.json（发布脚本 scripts/release.py 负责改那一处）。
+; 这里的兜底值只是为了单独调试本脚本时也能编译。
+!ifndef APP_VERSION
+  !define APP_VERSION "2.0.0"
+!endif
+
 !define APP_NAME      "JinyuTV"
-!define APP_VERSION   "2.0.0"
 !define APP_PUBLISHER "JinyuTV"
 !define APP_EXE       "JinyuTV.exe"
 !define APP_ID        "JinyuTV"
@@ -29,7 +35,8 @@ InstallDirRegKey HKCU "Software\${APP_ID}" "InstallDir"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "2.0.0.0"
+; VIProductVersion 需要四段数字，这里由三段版本号补一个 .0
+VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey "ProductName"      "${APP_NAME}"
 VIAddVersionKey "FileDescription"  "${APP_NAME} 安装程序"
 VIAddVersionKey "FileVersion"      "${APP_VERSION}"

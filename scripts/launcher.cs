@@ -1148,7 +1148,75 @@ class MainWindow : Form
             catch { }
         };
 
-        // ③ 启动动画 + 等服务就绪（最多 60 秒：首次启动要解压/初始化）
+        // ④ 接管下载：更新包（以及别的文件）点一下就落到「下载」文件夹，并告知位置、可一键安装。
+        //
+        // 为什么必须自己处理：WebView2 默认不接管下载，用户会不知道文件存到哪了 ——
+        // 而「检查更新 → 一键下载」的价值就在这一步。这里显式指定落盘路径，
+        // 完成后问一句「现在安装吗」，答是就拉起安装包并退出本程序（否则安装程序改不动正在被占用的文件）。
+        core.DownloadStarting += delegate(object s2, CoreWebView2DownloadStartingEventArgs e2)
+        {
+            try
+            {
+                string name = "JinyuTV-Setup.exe";
+                try
+                {
+                    string suggested = e2.ResultFilePath;
+                    if (!string.IsNullOrEmpty(suggested)) name = Path.GetFileName(suggested);
+                }
+                catch { }
+
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+                try { Directory.CreateDirectory(dir); } catch { }
+                string target = Path.Combine(dir, name);
+                // 重名就加序号，避免把用户上一次下载的安装包直接覆盖掉
+                if (File.Exists(target))
+                {
+                    string stem = Path.GetFileNameWithoutExtension(name);
+                    string ext = Path.GetExtension(name);
+                    for (int i = 2; File.Exists(target) && i < 100; i++)
+                        target = Path.Combine(dir, stem + " (" + i + ")" + ext);
+                }
+
+                e2.ResultFilePath = target;
+                e2.Handled = true;   // 自己接管，不弹浏览器的下载界面
+                JinyuTVLauncher.Trace("开始下载：" + name + " → " + target);
+
+                e2.DownloadOperation.StateChanged += delegate(object s3, object e3)
+                {
+                    try
+                    {
+                        if (e2.DownloadOperation.State != CoreWebView2DownloadState.Completed) return;
+                        JinyuTVLauncher.Trace("下载完成：" + target);
+                        BeginInvoke((Action)delegate
+                        {
+                            var choice = MessageBox.Show(
+                                "安装包已下载完成：\n" + target + "\n\n现在安装吗？\n（会先关闭 JinyuTV，装完再打开即可）",
+                                "JinyuTV 更新", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                            if (choice != DialogResult.Yes) return;
+                            try
+                            {
+                                Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                                Close();   // 关窗口 = 退出，先让出被占用的文件
+                            }
+                            catch (Exception ex)
+                            {
+                                MessageBox.Show("无法启动安装包：" + ex.Message, "JinyuTV", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        JinyuTVLauncher.Trace("下载完成回调异常：" + ex.Message);
+                    }
+                };
+            }
+            catch (Exception ex)
+            {
+                JinyuTVLauncher.Trace("接管下载失败：" + ex.Message);
+            }
+        };
+
+        // ⑤ 启动动画 + 等服务就绪（最多 60 秒：首次启动要解压/初始化）
         ShowHtml(LoadingHtml("正在启动服务…"));
         for (int i = 0; i < 240; i++)
         {

@@ -14,6 +14,25 @@ export const desktopUpdateError = ref("");
 export const hasDesktopUpdate = computed(() => desktopUpdateSnapshot.value?.channel !== "dev"
   && !!(desktopUpdateSnapshot.value?.updateAvailable || desktopUpdateSnapshot.value?.updateReady));
 
+/**
+ * 服务端是否支持「检查更新」。
+ *
+ * 为什么不用 `?desktop=1` 判断：启动器的窗口地址不带这个参数 ——
+ * 一旦带上，目录选择会改走原生文件对话框（`/api/desktop/selectDirectory`），
+ * 而我们的外壳没有原生运行时，那会让「导入项目 / 添加项目」直接报错。
+ * 所以改成**向服务端探一次**：我们的桌面发行版会返回更新状态，纯浏览器部署返回 404。
+ */
+export const desktopUpdateSupported = ref(false);
+let supportProbe: Promise<boolean> | undefined;
+
+export function probeDesktopUpdateSupport(): Promise<boolean> {
+  supportProbe ??= axios.get<{ data: updateSnapshot }>("/api/desktop/update", { timeout: 8000 })
+    .then(() => true)
+    .catch(() => false)
+    .then((supported) => { desktopUpdateSupported.value = supported; return supported; });
+  return supportProbe;
+}
+
 watch(desktopUpdateKey, () => {
   if (desktopUpdateSnapshot.value) desktopUpdateSnapshot.value = {
     ...desktopUpdateSnapshot.value, latestVersion: "", latestHash: "", error: "", updateAvailable: false, updateReady: false,
