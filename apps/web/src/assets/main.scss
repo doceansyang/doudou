@@ -1,0 +1,147 @@
+html:root {
+  --ui-radius: 8px;
+  --ui-radius-small: calc(var(--ui-radius) * 0.5);
+  --ui-radius-large: calc(var(--ui-radius) * 1.5);
+  --el-border-radius-base: var(--ui-radius);
+  --el-border-radius-small: var(--ui-radius-small);
+  --td-radius-small: var(--ui-radius-small);
+  --td-radius-default: var(--ui-radius);
+  --td-radius-medium: var(--ui-radius);
+  --td-radius-large: var(--ui-radius-large);
+  --td-radius-extraLarge: var(--ui-radius-large);
+  --td-brand-color: var(--el-color-primary);
+  --td-brand-color-hover: var(--el-color-primary-light-3);
+  --td-brand-color-focus: var(--el-color-primary-light-8);
+  --td-brand-color-active: var(--el-color-primary-dark-2);
+  --td-brand-color-disabled: var(--el-color-primary-light-5);
+  --td-brand-color-light: var(--el-color-primary-light-9);
+  --td-brand-color-light-hover: var(--el-color-primary-light-8);
+  --td-text-color-brand: var(--el-color-primary);
+  --td-text-color-link: var(--el-color-primary);
+
+  .el-card {
+    --el-card-border-radius: var(--ui-radius-large);
+  }
+
+  .el-popper {
+    --el-popper-border-radius: var(--ui-radius-large);
+    --el-popover-border-radius: var(--ui-radius-large);
+  }
+
+  .el-dropdown__popper {
+    > .el-scrollbar { border-radius: max(0px, calc(var(--el-popper-border-radius) - 1px)); }
+  }
+
+  /* Element Plus 的悬停态默认「底=主色浅调 + 字=主色」，主色近黑时会糊成一片
+     （下拉菜单悬停项整块变黑、文字看不见）。这里直接改悬停文字色，
+     用 App.vue 按主题与主色亮度推导出的可读前景色。
+     用直写声明而非覆盖 EP 变量，避免与 EP 自身 html.dark 里的同名变量比权重。 */
+  .el-dropdown-menu__item:not(.is-disabled):hover,
+  .el-dropdown-menu__item:not(.is-disabled):focus {
+    color: var(--ui-brand-foreground, var(--el-color-primary));
+  }
+
+  /* 下拉选项的选中态：EP 默认只把文字设为主色、不加背景，主色近黑时
+     在深色面板上完全看不出「当前选中哪一项」。这里改成
+     「主题中性底色 + 正文色文字」，任何主色、任何主题下都清晰可辨。 */
+  .el-select-dropdown__item.is-selected {
+    background-color: var(--el-fill-color-dark);
+    color: var(--el-text-color-primary);
+    font-weight: 700;
+
+    &::after { background-color: var(--el-text-color-primary); }
+  }
+
+  /* 下拉选项的悬停态：与上面「选中态」同因 —— EP 用主色表达，主色近黑时
+     文字与底色撞成一片（光标一扫过去整项变黑、文字消失）。 */
+  .el-select-dropdown__item:not(.is-disabled):hover,
+  .el-select-dropdown__item:not(.is-disabled):focus {
+    color: var(--ui-brand-foreground, var(--el-text-color-primary));
+    background-color: var(--el-fill-color-dark);
+  }
+
+  .el-dialog { --el-dialog-border-radius: var(--ui-radius-large); }
+  .el-tag { --el-tag-border-radius: var(--ui-radius-small); }
+}
+
+/* 深色主题下，Element Plus 的「选中态 / 链接 / 文字按钮」一律把文字设成主色。
+   用户把主色设成近黑（#171717）时，这些地方就变成"黑底黑字"的空块 —— 单选选中的文字、
+   el-link、文字按钮、primary 标签都是。这里统一改用可读的品牌前景色
+   （主色正常时该值与主色相同，等于零影响）。 */
+html.dark {
+  .el-radio.is-checked .el-radio__label,
+  .el-checkbox.is-checked .el-checkbox__label,
+  .el-check-tag.is-checked,
+  .el-link.el-link--primary,
+  .el-button--primary.is-link,
+  .el-button--primary.is-text {
+    color: var(--ui-brand-foreground, var(--el-color-primary));
+  }
+
+  /* 描边/虚线按钮：透明底 + 主色文字与边框，主色近黑时整颗按钮变成黑块。 */
+  .el-button--primary.is-plain,
+  .el-button--primary.is-dashed {
+    color: var(--ui-brand-foreground, var(--el-color-primary));
+    border-color: color-mix(in srgb, var(--ui-brand-foreground, var(--el-color-primary)) 55%, transparent);
+  }
+
+  .el-tag--primary {
+    --el-tag-text-color: var(--ui-brand-foreground, var(--el-color-primary));
+    --el-tag-bg-color: var(--el-fill-color-dark);
+    --el-tag-border-color: var(--el-border-color);
+  }
+
+  /* 不带 type 的普通按钮：EP 在「悬停 / 聚焦 / 按下」时把文字设成主色、
+     底色设成主色浅调。主色近黑（#171717）时两者亮度只差个位数，
+     整颗按钮糊成一块黑 ——用户报的「一悬停就变成黑块、文字全没了」就是这个。
+     实测：默认态 字207/底20（差191），悬停态 字23/底20（差3）。
+     统一改用「可读前景色 + 主题中性底色」，任何主色下都清晰。 */
+  .el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--warning):not(.el-button--danger):not(.el-button--info) {
+    &:hover,
+    &:focus,
+    &:active {
+      color: var(--ui-brand-foreground, var(--el-text-color-primary));
+      border-color: var(--el-border-color);
+      background-color: var(--el-fill-color-dark);
+    }
+
+    /* 文字/链接型按钮：底色保持透明，只在悬停时给中性底 */
+    &.is-text,
+    &.is-link {
+      &:hover,
+      &:focus,
+      &:active {
+        color: var(--ui-brand-foreground, var(--el-text-color-primary));
+        background-color: var(--el-fill-color-dark);
+      }
+    }
+  }
+}
+
+html,
+body,
+#app {
+  margin: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.stream-markdown [data-stream-markdown="tooltip"] {
+  z-index: var(--markdown-tooltip-z-index);
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--el-border-color);
+  border-radius: 4px;
+  &:hover {
+    background-color: var(--el-border-color-darker);
+  }
+}
+*::-webkit-scrollbar-track {
+  background-color: transparent;
+}

@@ -1,0 +1,56 @@
+node_modules/
+dist/
+/build/
+/data/
+/work/
+/backup/
+.playwright-mcp/
+playwright-report/
+test-results/
+/compat/macIntel/generated/
+/packages/startup/assets/macX64/
+/packages/startup/assets/macArm64/
+/apps/updateServer/public/
+/apps/updateServer/releases/
+/.hutch/
+/.cottontail-tmp/
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+Thumbs.db
+[Dd]esktop.ini
+.env
+.env.*
+!.env.example
+/apps/updateServer/build/
+.vscode
+*.p12
+*.pfx
+*.p8
+*.keychain
+*.keychain-db
+
+# ---------------------------------------------------------------------------
+# JinyuTV 本地内容（不进仓库）
+#
+# 说明：下面这些是「本机开发 / 测试产物」，不是项目的一部分。
+#   注意 `/assets/` 开头的斜杠是必须的 —— 它只匹配仓库根目录下的 assets/，
+#   不能写成 `assets/`，否则会把 packages/assets/、apps/web/src/assets/ 也一起忽略掉。
+# ---------------------------------------------------------------------------
+/.rebrand-backup/
+/.api-rebrand-backup/
+/.tfrouter-backup/
+/assets/
+/scripts/_out/
+/tools/_dl/
+*.orig
+*.bak
+*.bak2
+*.bak3
+*.prebuild
+*.manual
+
+# 上游的 GitHub Actions（本项目的构建/发布走本地脚本 toonflow/scripts/*，
+# 不用 Actions；而且 gh 令牌没有 workflow 权限，保留会被 GitHub 拒绝推送）
+/.github/workflows/

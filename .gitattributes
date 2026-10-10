@@ -1,0 +1,31 @@
+# 换行符策略
+#
+# 为什么单独规定 .bat/.cmd/.ps1：
+#   本项目有一条硬性红线 —— **批处理必须是 CRLF + 纯 ASCII**。
+#   LF 会让 cmd 的括号块解析失败（表现为双击脚本闪退、什么都不发生）。
+#   如果开发机或克隆端把行尾规范成 LF，脚本就会坏，所以这里按文件类型钉死。
+#
+# 其余文本统一 LF（跨平台一致），二进制交给 git 自己识别并显式声明，
+# 避免 Windows 上被当作文本改写、导致 DLL 损坏。
+
+* text=auto eol=lf
+
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.svg   text eol=lf
+*.dll   binary
+*.exe   binary
+*.nupkg binary
+*.mp4   binary
+*.mp3   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
