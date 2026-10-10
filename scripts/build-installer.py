@@ -71,6 +71,11 @@ OUT_SETUP = os.path.join(BASE, "JinyuTV-%s-Setup.exe" % VERSION)
 # 运行期真正需要的 RPA 文件（服务端会按 <安装目录>/scripts/doubao-rpa-service.ts 拉起）
 RPA_SCRIPTS = ["doubao-rpa-service.ts", "doubao-rpa-core.ts", "doubao-accounts.ts"]
 
+# 授权运行时（**必须**打进安装包，否则客户装完无法激活，软件直接打不开）。
+# 只放运行时必需的两个；签发用的 make-license.py / sign.ts 绝不能打进去
+# —— 那是作者自己的工具（见 sanitize() 里的移除与私钥兜底检查）。
+LICENSE_RUNTIME = ["license-core.ts", "license-bridge.ts"]
+
 # 不打进发行包的名字特征
 SKIP_SUFFIX = (".bak", ".bak2", ".bak3", ".prebuild", ".orig", ".manual", ".empty", ".log")
 SKIP_NAMES = {"logs", "_junk-backups", ".rebrand-backup"}
@@ -163,14 +168,24 @@ def build_stage():
         else:
             print("  %-13s !! 缺失" % name)
 
-    # 3) scripts/ 只保留 RPA 运行必需
+    # 3) scripts/ 只保留 RPA 运行必需 + 授权运行时
     dst_scripts = os.path.join(stage, "scripts")
     os.makedirs(dst_scripts, exist_ok=True)
-    for name in RPA_SCRIPTS:
+    for name in RPA_SCRIPTS + LICENSE_RUNTIME:
         src = os.path.join(SOFTWARE, "scripts", name)
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(dst_scripts, name))
-    print("  scripts/      %d 个 RPA 文件" % len(os.listdir(dst_scripts)))
+    dst_license = os.path.join(dst_scripts, "license")
+    os.makedirs(dst_license, exist_ok=True)
+    for name in LICENSE_RUNTIME:
+        src = os.path.join(SOFTWARE, "scripts", "license", name)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(dst_license, name))
+        else:
+            # 缺了它整包就废了（客户无法激活 → 软件打不开），必须在打包阶段就报错
+            raise SystemExit("!! 缺少授权运行时 %s，软件将无法激活，请先跑 dev-update.py 同步" % name)
+    print("  scripts/      %d 个 RPA 文件 + %d 个授权运行时"
+          % (len(RPA_SCRIPTS), len(os.listdir(dst_license))))
 
     sanitize(stage)
     return stage
@@ -219,6 +234,36 @@ def sanitize(stage):
         with open(sp, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
         print("  settings.json 已净化（启动器首次运行会按本机路径重建项目）")
+
+    # 授权：绝不能带任何已激活信息 —— 每台电脑必须自己输入授权码。
+    lic = os.path.join(stage, "data", "license.json")
+    if os.path.isfile(lic):
+        os.remove(lic)
+        print("  移除本机授权文件（每台电脑需自行激活）")
+
+    # 授权**签发工具**：make-license.py / sign.ts 只给作者自己用。
+    # 打给客户等于把签发能力送出去（虽然私钥不在包里，但工具本身不该外流）。
+    removed_tools = []
+    for rel in ("scripts/license/make-license.py", "scripts/license/sign.ts"):
+        path = os.path.join(stage, rel.replace("/", os.sep))
+        if os.path.isfile(path):
+            os.remove(path)
+            removed_tools.append(os.path.basename(rel))
+    if removed_tools:
+        print("  移除授权签发工具：%s（仅作者本机保留）" % "、".join(removed_tools))
+
+    # 兜底：任何形态的密钥文件都不该出现在安装包里
+    leaked = []
+    for dirpath, _, filenames in os.walk(stage):
+        for name in filenames:
+            if name.endswith((".jwk", ".pem")) or name.lower().startswith("private"):
+                leaked.append(os.path.relpath(os.path.join(dirpath, name), stage))
+    if leaked:
+        raise SystemExit(
+            "!! 安装包里出现了疑似私钥文件，已中止打包：%s\n"
+            "   （私钥绝不能随软件分发，请检查打包流程）" % "、".join(leaked)
+        )
+    print("  私钥检查：未发现 .jwk/.pem/private* 文件 ✓")
 
     # 兜底：清掉可能被带进来的 .orig
     for dirpath, _, filenames in os.walk(stage):

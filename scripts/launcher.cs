@@ -66,6 +66,16 @@ class JinyuTVLauncher
         Trace("本机适配完成");
         if (bootstrapOnly) return 0;
 
+        // ---- 主机授权（主机锁）：未激活就不往下走 ----
+        // 为什么放在这一步：它是**起服务之前**的最后一道门。
+        // 服务起来之后前端就能连上，只靠前端提示等于没锁；
+        // 放在这里，未激活时连后端都不会启动，功能真正不可用。
+        if (!EnsureLicensed())
+        {
+            Trace("未授权，退出（仅本机适配已完成）");
+            return 2;
+        }
+
         string server = Path.Combine(BaseDir, "build", "server", "index.js");
         if (!File.Exists(server))
         {
@@ -176,6 +186,319 @@ class JinyuTVLauncher
             });
         }
         catch { }
+    }
+
+    // ------------------------------------------------------------------ 主机授权
+
+    static string LicenseFile { get { return Path.Combine(BaseDir, "data", "license.json"); } }
+
+    static string BunPath()
+    {
+        string local = Path.Combine(BaseDir, "runtime", "bun.exe");
+        return File.Exists(local) ? local : "bun";
+    }
+
+    /// <summary>
+    /// 调用 license-bridge.ts（授权逻辑的唯一来源）。
+    /// 为什么不让 C# 重写一遍机器码采集：两份实现必然漂移，
+    /// 症状是「客户激活时提示机器码不匹配」，且极难排查。
+    /// </summary>
+    static string LicenseBridge(string json)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = BunPath(),
+                Arguments = "scripts/license/license-bridge.ts",
+                WorkingDirectory = BaseDir,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            using (var p = Process.Start(psi))
+            {
+                if (p == null) return "";
+                p.StandardInput.Write(json);
+                p.StandardInput.Close();
+                string output = p.StandardOutput.ReadToEnd();
+                // 超时保护：硬件采集最多 6 秒 ×3 项，给 30 秒足够；
+                // 卡死会让「双击没反应」，比报错更难排查。
+                if (!p.WaitForExit(30000)) { try { p.Kill(); } catch { } return ""; }
+                string text = (output ?? "").Trim();
+                int line = text.LastIndexOf('\n');
+                return line >= 0 ? text.Substring(line + 1).Trim() : text;
+            }
+        }
+        catch (Exception ex)
+        {
+            Trace("授权桥调用失败：" + ex.Message);
+            return "";
+        }
+    }
+
+    static string JsonString(string raw, string key)
+    {
+        if (string.IsNullOrEmpty(raw)) return "";
+        string token = "\"" + key + "\":";
+        int at = raw.IndexOf(token, StringComparison.Ordinal);
+        if (at < 0) return "";
+        int i = at + token.Length;
+        while (i < raw.Length && (raw[i] == ' ' || raw[i] == '"')) i++;
+        if (i < raw.Length && raw[i] == '"')
+        {
+            int end = raw.IndexOf('"', i + 1);
+            return end < 0 ? "" : raw.Substring(i + 1, end - i - 1);
+        }
+        int stop = i;
+        while (stop < raw.Length && raw[stop] != ',' && raw[stop] != '}') stop++;
+        return raw.Substring(i, stop - i).Trim();
+    }
+
+    /// <summary>校验授权；未激活则弹授权窗口让用户输入授权码。返回是否可继续启动。</summary>
+    static bool EnsureLicensed()
+    {
+        string file = LicenseFile.Replace("\\", "\\\\");
+
+        // 已激活：直接校验（能识别「授权文件被复制到另一台机器」）
+        string result = LicenseBridge("{\"action\":\"verify\",\"licenseFile\":\"" + file + "\"}");
+        if (result.Contains("\"ok\":true"))
+        {
+            string note = JsonString(result, "note");
+            Trace("授权有效" + (note.Length > 0 ? "（" + note + "）" : ""));
+            return true;
+        }
+
+        // 没激活 / 授权无效 → 弹窗口
+        string reason = JsonString(result, "reason");
+        if (reason == "NOT_ACTIVATED") reason = "";
+        string machine = JsonString(result, "machineCode");
+        Trace("需要激活授权（机器码 " + machine + "）" + (reason.Length > 0 ? "：原因为 " + reason : ""));
+
+        using (var form = new LicenseForm(machine, reason))
+        {
+            if (form.ShowDialog() != DialogResult.OK)
+            {
+                Trace("用户取消激活，退出");
+                return false;
+            }
+        }
+
+        // 激活后复核一次，不信任窗口的自述结果
+        string again = LicenseBridge("{\"action\":\"verify\",\"licenseFile\":\"" + file + "\"}");
+        bool ok = again.Contains("\"ok\":true");
+        Trace(ok ? "激活成功" : "!! 激活后复核失败：" + again);
+        return ok;
+    }
+
+    /// <summary>授权窗口：显示机器码（可一键复制）+ 输入授权码 + 激活按钮。</summary>
+    class LicenseForm : Form
+    {
+        readonly string _machine;
+        readonly string _reason;
+        readonly TextBox _input;
+        readonly Label _status;
+        readonly Button _activate;
+        readonly Button _exitButton;
+
+        public LicenseForm(string machine, string reason)
+        {
+            _machine = machine ?? "";
+            _reason = reason ?? "";
+
+            Text = "JinyuTV 激活";
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            ClientSize = new Size(520, 430);
+            BackColor = JinyuTVLauncher.ShellBg;
+            ForeColor = Color.FromArgb(229, 234, 243);
+            Font = new Font("Microsoft YaHei UI", 9F);
+            KeyPreview = true;
+
+            var title = new Label
+            {
+                Text = "需要激活才能使用",
+                Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(235, 238, 245),
+                Bounds = new Rectangle(28, 22, 460, 32),
+            };
+
+            var intro = new Label
+            {
+                Text = "本软件按电脑授权，一台电脑需要一个授权码。\r\n" +
+                       "把下面的机器码发给软件提供方，拿到授权码后粘贴进来即可。",
+                ForeColor = Color.FromArgb(160, 166, 180),
+                Bounds = new Rectangle(28, 60, 470, 44),
+            };
+
+            var codeLabel = new Label
+            {
+                Text = "本机机器码",
+                ForeColor = Color.FromArgb(150, 156, 170),
+                Bounds = new Rectangle(28, 114, 200, 20),
+            };
+
+            var codeBox = new TextBox
+            {
+                Text = _machine,
+                ReadOnly = true,
+                Bounds = new Rectangle(28, 136, 380, 28),
+                BackColor = Color.FromArgb(34, 34, 42),
+                ForeColor = Color.FromArgb(126, 214, 160),
+                Font = new Font("Consolas", 12F),
+                BorderStyle = BorderStyle.FixedSingle,
+            };
+
+            var copyBtn = new Button
+            {
+                Text = "复制机器码",
+                Bounds = new Rectangle(414, 135, 82, 30),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(45, 45, 55),
+                ForeColor = Color.FromArgb(215, 220, 232),
+                Cursor = Cursors.Hand,
+                TabStop = false,
+            };
+            copyBtn.Click += delegate
+            {
+                try
+                {
+                    Clipboard.SetText(_machine);
+                    copyBtn.Text = "已复制";
+                    // ⚠️ 必须写全命名空间：using 里同时有 System.Threading.Timer
+                    //与 System.Windows.Forms.Timer，直接写 Timer 会有歧义（编译报错 CS0104）。
+                    var timer = new System.Windows.Forms.Timer { Interval = 1600 };
+                    timer.Tick += delegate(object s, EventArgs e)
+                    {
+                        ((System.Windows.Forms.Timer)s).Stop();
+                        copyBtn.Text = "复制机器码";
+                    };
+                    timer.Start();
+                }
+                catch (Exception ex) { _status.Text = "复制失败：" + ex.Message; }
+            };
+
+            var inputLabel = new Label
+            {
+                Text = "授权码",
+                ForeColor = Color.FromArgb(150, 156, 170),
+                Bounds = new Rectangle(28, 178, 200, 20),
+            };
+
+            _input = new TextBox
+            {
+                Bounds = new Rectangle(28, 200, 468, 76),
+                BackColor = Color.FromArgb(30, 30, 37),
+                ForeColor = Color.FromArgb(225, 230, 240),
+                Font = new Font("Consolas", 9F),
+                BorderStyle = BorderStyle.FixedSingle,
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                WordWrap = true,
+            };
+
+            _status = new Label
+            {
+                Text = _reason.Length > 0 ? ("上次激活未通过：" + _reason) : "",
+                ForeColor = _reason.Length > 0 ? Color.FromArgb(240, 140, 130) : Color.FromArgb(150, 156, 170),
+                Bounds = new Rectangle(28, 286, 468, 44),
+            };
+
+            _activate = new Button
+            {
+                Text = "激活",
+                Bounds = new Rectangle(318, 348, 88, 34),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(38, 78, 56),
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold),
+                Cursor = Cursors.Hand,
+                TabStop = false,
+            };
+            _activate.Click += delegate { TryActivate(); };
+
+            _exitButton = new Button
+            {
+                Text = "退出",
+                Bounds = new Rectangle(410, 348, 86, 34),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(48, 48, 56),
+                ForeColor = Color.FromArgb(200, 205, 215),
+                Cursor = Cursors.Hand,
+                TabStop = false,
+                DialogResult = DialogResult.Cancel,
+            };
+
+            var tip = new Label
+            {
+                Text = "提示：授权码与本机绑定，复制到其它电脑无效。",
+                ForeColor = Color.FromArgb(120, 126, 140),
+                Font = new Font("Microsoft YaHei UI", 8.5F),
+                Bounds = new Rectangle(28, 352, 280, 30),
+            };
+
+            Controls.AddRange(new Control[] { title, intro, codeLabel, codeBox, copyBtn,
+                                               inputLabel, _input, _status, tip, _activate, _exitButton });
+            AcceptButton = _activate;
+            CancelButton = _exitButton;
+            Shown += delegate { _input.Focus(); };
+        }
+
+        // 命名避开 Form.Activate()（同名会触发 CS0108 警告，且语义上也不该同名）
+        void TryActivate()
+        {
+            string code = (_input.Text ?? "").Trim();
+            if (code.Length < 20)
+            {
+                _status.ForeColor = Color.FromArgb(240, 140, 130);
+                _status.Text = "授权码看起来不完整，请把整段复制进来（通常 200 多个字符）。";
+                return;
+            }
+
+            _activate.Enabled = false;
+            _activate.Text = "验证中…";
+            Application.DoEvents();
+            try
+            {
+                string file = LicenseFile.Replace("\\", "\\\\");
+                string result = LicenseBridge(
+                    "{\"action\":\"activate\",\"code\":\"" + EscapeJson(code) + "\",\"licenseFile\":\"" + file + "\"}");
+                if (result.Contains("\"ok\":true"))
+                {
+                    string note = JsonString(result, "note");
+                    MessageBox.Show(this,
+                        "激活成功！" + (note.Length > 0 ? ("\r\n\r\n授权信息：" + note) : "") + "\r\n\r\n现在将启动软件。",
+                        "JinyuTV", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    DialogResult = DialogResult.OK;
+                    Close();
+                    return;
+                }
+                _status.ForeColor = Color.FromArgb(240, 140, 130);
+                _status.Text = JsonString(result, "reason");
+                if (_status.Text.Length == 0) _status.Text = "激活失败，请确认授权码完整无误。";
+                _input.SelectAll();
+                _input.Focus();
+            }
+            catch (Exception ex)
+            {
+                _status.ForeColor = Color.FromArgb(240, 140, 130);
+                _status.Text = "激活出错：" + ex.Message;
+            }
+            finally
+            {
+                _activate.Enabled = true;
+                _activate.Text = "激活";
+            }
+        }
+
+        static string EscapeJson(string value)
+        {
+            return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
+        }
     }
 
     // ---------------------------------------------------------------- 本机适配

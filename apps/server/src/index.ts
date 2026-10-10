@@ -69,6 +69,82 @@ async function ensureDoubaoRpaService(): Promise<void> {
   }
 }
 
+/**
+ * 主机授权的**服务端二次校验**。
+ *
+ * 为什么启动器已经校验过了还要再来一次：
+ *   启动器的门可以被绕过 —— 用户双击 `start-server.bat` 就能直接起服务，
+ *   前端照样能用（等于没锁）。所以服务端也要自己确认一次授权。
+ *
+ * 为什么放在 `listen` **之前**：端口都不开，前端连都连不上，
+ * 这才是真正的「不可用」，而不是弹个提示还能点。
+ *
+ * 开发态（`NODE_ENV=dev` / 直接 bun 跑源码）跳过校验，
+ * 否则每次改代码都要先激活，太妨碍开发。
+ */
+async function ensureLicensed(appDir: string, fromSource: boolean): Promise<boolean> {
+  if (process.env.JINYUTV_SKIP_LICENSE === "1") {
+    console.log("[授权] 已通过环境变量跳过校验（开发用）");
+    return true;
+  }
+  const licenseFile = resolve(appDir, "data", "license.json");
+  if (!existsSync(licenseFile)) {
+    console.error(`[授权] 未找到授权文件：${licenseFile}`);
+    console.error("[授权] 请通过桌面快捷方式启动 JinyuTV，在弹出的窗口里输入授权码激活。");
+    return false;
+  }
+  // 复用 license-bridge.ts（授权逻辑的唯一来源），不在服务端另写一份
+  const bridge = resolve(appDir, "scripts", "license", "license-bridge.ts");
+  if (!existsSync(bridge)) {
+    console.error(`[授权] 未找到授权校验脚本：${bridge}（安装可能不完整）`);
+    return false;
+  }
+  return new Promise((done) => {
+    try {
+      const child = spawn(process.execPath, ["run", bridge], {
+        cwd: appDir,
+        stdio: ["pipe", "pipe", "ignore"],
+        env: { ...process.env },
+      });
+      let out = "";
+      child.stdout?.on("data", (chunk) => { out += String(chunk); });
+      child.on("error", (error) => {
+        console.error(`[授权] 校验进程启动失败：${error.message}`);
+        done(false);
+      });
+      child.on("close", () => {
+        const line = out.trim().split("\n").pop() || "";
+        if (line.includes('"ok":true')) {
+          console.log("[授权] 校验通过，本机已激活");
+          done(true);
+        } else {
+          const reason = line.match(/"reason":"([^"]*)"/)?.[1] || "授权无效";
+          console.error(`[授权] 校验未通过：${reason}`);
+          done(false);
+        }
+      });
+      child.stdin?.write(JSON.stringify({ action: "verify", licenseFile }));
+      child.stdin?.end();
+      //兜底：bridge 卡死不能让服务永远不启动
+      setTimeout(() => {
+        if (!child.killed) { try { child.kill(); } catch { /* 已退出 */ } }
+      }, 30000).unref?.();
+    } catch (error) {
+      console.error(`[授权] 校验异常：${error instanceof Error ? error.message : String(error)}`);
+      done(false);
+    }
+  });
+}
+
+const licensed = await ensureLicensed(appDirectory, fromSource);
+if (!licensed) {
+  console.error("=".repeat(64));
+  console.error("[授权] 本机未激活，服务不会启动。");
+  console.error("[授权] 请双击 JinyuTV 图标启动，在弹出的激活窗口里输入授权码。");
+  console.error("=".repeat(64));
+  process.exit(3);
+}
+
 const { initializeMcpRuntime } = await import("./utils/mcp/runtime");
 const listener = app.listen(realPort, async () => {
   await initializeMcpRuntime(app, `http://127.0.0.1:${realPort}`, resolve(appDirectory, fromSource ? "packages/mcp/src/stdio.ts" : "build/mcp/stdio.js"));

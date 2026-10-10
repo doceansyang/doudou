@@ -54,3 +54,11 @@ Thumbs.db
 # 上游的 GitHub Actions（本项目的构建/发布走本地脚本 toonflow/scripts/*，
 # 不用 Actions；而且 gh 令牌没有 workflow 权限，保留会被 GitHub 拒绝推送）
 /.github/workflows/
+
+# 授权签发私钥（绝不能进仓库；正常也不在这里，仅作兜底）
+*.jwk
+*.pem
+scripts/license/private*
+
+# 本机授权文件（每台机器自己激活后生成，不该进仓库）
+/data/license.json
