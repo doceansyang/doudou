@@ -20,17 +20,20 @@
           </div>
         </div>
         <div class="updateActions">
-          <el-select :modelValue="updateSource" aria-label="更新源" size="small" :disabled="working || sourceSaving" @change="saveUpdateSource">
-            <template #prefix>
-              <icon-brand-github v-if="updateSource === 'github'" :size="14" aria-hidden="true" />
-              <icon-world v-else :size="14" aria-hidden="true" />
-            </template>
-            <el-option label="官方源" value="official" />
-            <el-option label="GitHub" value="github" />
-            <el-option v-if="customUpdateUrl" label="自定义源" value="custom" />
-          </el-select>
+          <!--
+            更新源只有一个：JinyuTV 自己的 GitHub Releases。
+            以前这里是个下拉框（官方源 / GitHub / 自定义源），但：
+              · 「官方源」指向上游 Linke 网关，会提示更新到**别人产品**的版本；
+              · 「自定义源」没有实际使用场景，却让用户以为要自己填地址。
+            单一来源还意味着**没有任何配置可错** —— 所以不再需要下拉框，
+            改成一个只说明「更新从哪来」的静态标签。
+          -->
+          <span class="updateSourceTag" aria-label="更新源：JinyuTV 官方 GitHub 仓库">
+            <icon-brand-github :size="14" aria-hidden="true" />
+            JinyuTV 官方仓库
+          </span>
           <el-badge isDot :hidden="!hasDesktopUpdate">
-            <el-button size="small" type="primary" plain :loading="checking" :disabled="sourceSaving" @click="openUpdate">
+            <el-button size="small" type="primary" plain :loading="checking" :disabled="working" @click="openUpdate">
               {{ snapshot?.installFailure ? "查看更新失败原因" : snapshot?.updateReady ? "更新已就绪" : snapshot?.updating || action === "download" ? "查看更新进度" : "检查更新" }}
             </el-button>
           </el-badge>
@@ -208,10 +211,7 @@ import logoUrl from "@toonflow/assets/logo.svg";
 // 全站统一使用的微信二维码（交流群 / 商务合作都用这一张，直接展示图片，不按 URL 现生成）
 import wechatQrUrl from "@toonflow/assets/wechat-qr.png";
 import tf, { type TfSponsor } from "@/lib/tf";
-import { saveSettings } from "@/stores/settings";
 import {
-  desktopUpdateSource as updateSource,
-  desktopUpdateCustomUrl as customUpdateUrl,
   desktopUpdateSnapshot as snapshot,
   desktopUpdateError as updateError,
   desktopUpdateAction as action,
@@ -224,7 +224,6 @@ import {
 
 const messageMarkdown = defineAsyncComponent(() => import("@/components/messageMarkdown.vue"));
 const currentVersion = computed(() => snapshot.value?.version || import.meta.env.appVersion);
-const sourceSaving = ref(false);
 const checking = computed(() => desktopUpdateChecking.value);
 const working = computed(() => !!action.value);
 const resultVisible = ref(false);
@@ -292,25 +291,12 @@ function openUpdate() {
   void runUpdate("check");
 }
 
-async function saveUpdateSource(source: string) {
-  if (source === updateSource.value || sourceSaving.value || working.value) return;
-  if (source !== "official" && source !== "github" && (source !== "custom" || !customUpdateUrl.value)) return;
-  sourceSaving.value = true;
-  try {
-    await saveSettings(() => ({ desktopUpdateSource: source }));
-  } catch (error) {
-    ElMessage.error(getUpdateError(error));
-  } finally {
-    sourceSaving.value = false;
-  }
-}
-
 function getUpdateError(error: unknown) {
   return axios.isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || error.message : String(error);
 }
 
 async function runUpdate(nextAction: "read" | "check" | "download" | "apply") {
-  if (working.value || sourceSaving.value) return;
+  if (working.value) return;
   updateError.value = "";
   // 由服务端能力决定能不能检查更新（而不是 `?desktop=1`，见 stores/desktopUpdate.ts）。
   if (!desktopUpdateSupported.value && !(await probeDesktopUpdateSupport())) {
@@ -416,8 +402,21 @@ async function runUpdate(nextAction: "read" | "check" | "download" | "apply") {
           align-items: center;
           gap: 8px;
 
-          :deep(.el-select) {
-            width: 120px;
+          // 更新源只有一个（我们自己的 GitHub Releases），没有可选项就不给下拉框。
+          // 这个标签只回答「更新从哪来」，不可点 —— 免得让人以为能改。
+          .updateSourceTag {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            height: 24px;
+            padding: 0 9px;
+            border: 1px solid var(--el-border-color-lighter);
+            border-radius: var(--el-border-radius-base);
+            background: var(--el-fill-color-light);
+            color: var(--el-text-color-regular);
+            font-size: 12px;
+            white-space: nowrap;
+            user-select: none;
           }
         }
       }

@@ -7,15 +7,15 @@ import type { DesktopRuntime, desktopUpdateAttempt, updateSnapshot } from "@/typ
 
 const RELEASE_BASE = "https://github.com/doceansyang/doudou/releases/latest/download";
 /**
- * 更新源。
- *   · 上游的「官方源」是 Linke 网关（api.linke.link/web/version/desktopUpdates），
- *     返回的是**他们自己产品**的版本 —— 对我们来说是错的（会提示更新到别人的版本），
- *     所以这里把它改成我们自己的发布页。
- *   · 「GitHub」保持同一地址，避免历史配置指向别处。
- * 清单固定叫 latest.json：`…/releases/latest/download/latest.json` 永远解析到最新一次发布的资产。
+ * 更新源（唯一）：JinyuTV 自己的 GitHub Releases。
+ *
+ * 为什么不再保留上游的「官方源」：那是 Linke 网关
+ * （api.linke.link/web/version/desktopUpdates），返回的是**他们自己产品**的版本，
+ * 对我们来说是错的 —— 会提示用户「更新到别人的版本」。
+ * 清单固定叫 latest.json：`…/releases/latest/download/latest.json`
+ * 永远解析到最新一次发布的资产，所以**发新版本不需要改客户端任何地址**。
  */
 const updateBaseUrls = {
-  official: RELEASE_BASE,
   github: RELEASE_BASE,
 };
 const updateRuntimeId = crypto.randomUUID();
@@ -91,10 +91,13 @@ export function isValidUpdateUrl(value: unknown): value is string {
 }
 
 function getUpdateBaseUrl(): string {
-  const settings = conf.get("settings", {});
-  if (settings.desktopUpdateSource === "github") return updateBaseUrls.github;
-  if (settings.desktopUpdateSource === "custom" && isValidUpdateUrl(settings.desktopUpdateCustomUrl)) return settings.desktopUpdateCustomUrl;
-  return updateBaseUrls.official;
+  // 更新源**只有一个**：我们自己的 GitHub Releases。
+  // 以前这里有三个选项（official / github / custom），但：
+  //   · official 指向上游 Linke 网关，会拿回**别人产品**的版本清单；
+  //   · custom 没有实际使用场景，却让用户以为要自己填地址。
+  // 历史配置里可能还留着 desktopUpdateSource / desktopUpdateCustomUrl，
+  // 现在一律忽略 —— 单一来源也意味着「没有任何配置能改错更新地址」。
+  return updateBaseUrls.github;
 }
 
 async function withUpdateSource<T>(updater: DesktopRuntime["updater"], updateBaseUrl: string, run: () => Promise<T>) {
