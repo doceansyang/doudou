@@ -29,11 +29,9 @@ const version = "1.1.0";
 /**
  * 浏览器窗口标记（命令行开关）。
  *
- * JinyuTV 桌面端会用 WMI 扫「命令行里带这个标记」的浏览器进程，
- * 把它的窗口收编进软件内的「豆包窗口」侧栏 —— 用户因此在软件里就能
- * 看到并操作扫码登录 / 人工安全验证，不必满屏幕找一个被挡住的浏览器窗口。
- *
- * 标记本身是个无害的自定义开关，浏览器会忽略它，只用于被识别。
+ * 早先版本用它让桌面端 WMI 扫出浏览器窗口、SetParent 收编进软件侧栏。
+ * 用户反馈「在侧栏与全屏之间来回乱跳，反而更难用」，**收编已整体移除**，
+ * 桌面端不再碰这个窗口；这里保留标记只作调试识别之用（浏览器会忽略它）。
  */
 const RPA_WINDOW_MARK = "--toonflow-rpa=1";
 
@@ -174,8 +172,8 @@ function chromeExecutable(): string | undefined {
  *    **之后每次启动都沿用那个坐标**，用户看到的现象就是
  *    「任务栏里能看到这个窗口，屏幕上却怎么都找不到」——
  *    豆包要求扫码授权/人工验证时，用户根本无从操作。
- *    所以这里始终给一个屏幕内的固定初始位置（窗口随后会被软件收编进侧栏，
- *    这个坐标只在「收编失败」时作为兜底，保证用户仍能自己找到它）。
+ *    所以这里始终给一个屏幕内的固定初始位置；需要扫码/验证时 revealBrowserWindow()
+ *    还会把它摆到屏幕内并置前，保证用户一定找得到、点得到。
  *
  * profileDir 是账号隔离的关键：每个豆包账号一个独立 profile，
  * 登录态互不干扰，才能做到「多账号、额度用尽自动换号」。
@@ -948,7 +946,7 @@ async function handleCaptcha(page: any): Promise<void> {
   const revealed = await revealBrowserWindow(page);
   log(
     revealed
-      ? "检测到豆包人工安全验证：请到软件右侧的「豆包窗口」里完成验证（未嵌入时会弹出浏览器窗口），最多等 5 分钟…"
+      ? "检测到豆包人工安全验证：请在弹出的豆包浏览器窗口里完成验证，最多等 5 分钟…"
       : "检测到豆包人工安全验证：请手动切换到豆包浏览器窗口完成验证（最多等 5 分钟）…",
   );
   const deadline = Date.now() + CAPTCHA_WAIT_MS;
@@ -988,14 +986,14 @@ async function blockReason(page: any): Promise<string> {
   const text = (await pageAndFrameText(page)).replace(/\s+/g, "");
 
   if (await hasCaptchaSurface(page)) {
-    return "豆包触发人工安全验证，本次任务已停止；请到软件右侧的「豆包窗口」里完成验证后重新生成";
+    return "豆包触发人工安全验证，本次任务已停止；请在弹出的豆包浏览器窗口里完成验证后重新生成";
   }
   if (
     /(?:安全|人机|滑块|图片)验证|请(?:先)?完成(?:人脸|真人|身份)?验证|(?:人脸|真人|身份)?验证后继续|请完成.{0,16}验证|完成验证后|验证通过后/i.test(text)
     || /(?:请|按住).{0,12}(?:拖动|滑动).{0,12}(?:滑块|拼图)/.test(text)
     || /请依次点击|点击图中|请选择.{0,24}(?:图片|图案)/.test(text)
   ) {
-    return "豆包触发人工安全验证，本次任务已停止；请到软件右侧的「豆包窗口」里完成验证后重新生成";
+    return "豆包触发人工安全验证，本次任务已停止；请在弹出的豆包浏览器窗口里完成验证后重新生成";
   }
   if (
     /疑似包含(?:侵权|违规|侵权\/违规)内容/.test(text)
@@ -1109,14 +1107,12 @@ export async function openLogin(profileDir?: string, accountType?: string): Prom
   try {
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(home, { waitUntil: "domcontentloaded", timeout: 60000 });
-    // 扫码授权必须让用户看得见。两个层次：
-    //   ① 桌面端（JinyuTV.exe）会把带 --toonflow-rpa 标记的浏览器窗口收编进
-    //      软件右侧的「豆包窗口」侧栏 —— 用户就在软件里扫码，不存在"找不到窗口"。
-    //   ② 万一收编没生效（例如直接跑服务、没有桌面壳），这里再把窗口摆到屏幕内并置顶兜底。
+    // 扫码授权必须让用户看得见：把浏览器窗口摆到屏幕内并置前。
+    // （桌面端已不再收编这个窗口 —— 用户反馈侧栏里「来回乱跳」反而更难用。）
     await revealBrowserWindow(page);
     if (await isLoggedIn(context, type)) return;
     await assertPlatformAccessible(page, type);
-    log(`请在软件右侧的「豆包窗口」里扫码登录 ${label}（${home}，未嵌入时会弹出浏览器窗口），完成后会自动继续`);
+    log(`请在弹出的豆包浏览器窗口里扫码登录 ${label}（${home}），完成后会自动继续`);
     // Dola 页面较重，实测等待期间偶发 renderer 崩溃（自动探针里复现过）。
     // 崩了就把登录页**换一个新页**重开继续等，而不是直接失败让用户从头再来。
     // （必须换新页：崩溃后的 page 对象已经不可用，继续用它只会连环报错。）
@@ -1169,7 +1165,7 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
       const page0 = context.pages()[0] ?? (await context.newPage());
       await page0.goto(home, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => undefined);
       await revealBrowserWindow(page0);
-      log(`${label}登录态已失效：已在软件右侧的「豆包窗口」里打开登录页（未嵌入时会弹出浏览器窗口），请在 10 分钟内扫码登录，登录后会自动继续生成…`);
+      log(`${label}登录态已失效：已弹出浏览器窗口并打开登录页，请在 10 分钟内扫码登录，登录后会自动继续生成…`);
       const loginDeadline = Date.now() + LOGIN_TIMEOUT_MS;
       let logged = false;
       while (Date.now() < loginDeadline) {
@@ -1426,7 +1422,7 @@ export default {
   label: "豆包账号（免费额度）",
   version: version,
   apiUrl: HOME,
-  readme: "## 豆包 / Dola 账号（免费额度）\n\n用你自己的账号，通过浏览器自动化操作网页版生成视频，消耗账号每日免费额度，不额外付费。\n\n**支持两个平台**（在同一处绑定，账号池统一调度）：\n- **豆包**（`doubao.com`，国内）：每日免费额度通常 3～5 条 10 秒视频。\n- **Dola**（`dola.com`，海外）：独立站点与独立每日额度，按账号发放。\n\n**首次使用**：新增账号并选择平台 → 扫码登录（登录窗口会收编进软件右侧的「豆包窗口」），登录态保存在本机。\n\n**工作方式**\n- 生成时会打开一个真实 Chrome 窗口操作对应平台的网页（窗口在屏幕内，可随时查看；需要扫码登录或人工验证时会自动移到最前）。\n- 额度耗尽会自动标记该账号并换下一个；两个平台各自独立计数。\n- 若页面弹出「素材已获授权」安全确认，会自动确认；连续 3 轮未通过时需要人工在浏览器里点一下。\n- 需要本机已安装 Chrome 或 Edge（Windows 10/11 自带 Edge，无需额外安装）。",
+  readme: "## 豆包 / Dola 账号（免费额度）\n\n用你自己的账号，通过浏览器自动化操作网页版生成视频，消耗账号每日免费额度，不额外付费。\n\n**支持两个平台**（在同一处绑定，账号池统一调度）：\n- **豆包**（`doubao.com`，国内）：每日免费额度通常 3～5 条 10 秒视频。\n- **Dola**（`dola.com`，海外）：独立站点与独立每日额度，按账号发放。\n\n**首次使用**：新增账号并选择平台 → 扫码登录（登录时软件会弹出一个浏览器窗口，在那个窗口里扫码即可），登录态保存在本机。\n\n**工作方式**\n- 生成时会打开一个真实 Chrome 窗口操作对应平台的网页（窗口在屏幕内，可随时查看；需要扫码登录或人工验证时会自动移到最前）。\n- 额度耗尽会自动标记该账号并换下一个；两个平台各自独立计数。\n- 若页面弹出「素材已获授权」安全确认，会自动确认；连续 3 轮未通过时需要人工在浏览器里点一下。\n- 需要本机已安装 Chrome 或 Edge（Windows 10/11 自带 Edge，无需额外安装）。",
   rules: [{ field: "note", value: "首次使用请先新增账号（可选豆包或 Dola）并完成扫码登录；登录态保存在本机" }],
   models: [
     {

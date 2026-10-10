@@ -48,6 +48,7 @@ Thumbs.db
 *.bak
 *.bak2
 *.bak3
+*.bak-*
 *.prebuild
 *.manual
 

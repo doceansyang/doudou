@@ -10,12 +10,13 @@
 //         以及系统上的 WebView2 Runtime（Win10 1607+ 通常已随 Edge 预装）。
 //   若 Runtime 缺失，自动降级为默认浏览器打开并在窗口内提示，保证「永远有界面可看」。
 //
-// 豆包窗口的收编（本文件后半部分 EmbedWatch）：
-//   RPA 需要真实浏览器（豆包风控识别无头），以前它另起一个**独立顶层窗口**，
-//   被别的窗口一挡，用户就「找不到那个窗口」，扫码/人工验证无从下手。
-//   现在由本进程定时扫出带 `--toonflow-rpa` 标记的浏览器进程，把它的窗口
-//   SetParent 到右侧「豆包窗口」侧栏里 —— 用户全程在软件内部看到并操作。
-//   侧栏按需自动展开；Ctrl+B 可手动收起/展开。
+// 豆包窗口：**不再收编进软件**（用户要求「直接弹出来，不然来回乱跳」）。
+//   早先版本把 RPA 浏览器 SetParent 到右侧侧栏，意图是让用户「在软件内看到并操作」。
+//   但实际体验更差：①侧栏每 2.5 秒强制归位一次，和 RPA 自己摆位互相打架，
+//   窗口在侧栏与全屏之间反复跳；②扫码/验证时用户要在这个窗口与外部窗口之间来回切。
+//   → 现在启动器**完全不碰** RPA 浏览器窗口：它由 doubao-rpa-core 的
+//   revealBrowserWindow() 摆到屏幕内并置前，作为普通独立窗口弹出。
+//   本文件里与收编有关的一切（侧栏控件、WMI 扫描、Embed/Detach、Ctrl+B）已全部移除。
 //
 // 为什么要「自动适配本机」：
 //   安装包里的 data/ 是**打包时那台机器**的快照，settings.json 与 doubao/accounts.json
@@ -28,11 +29,9 @@
 //   JinyuTV.exe                  正常启动（校准 + 起服务 + 开窗口）
 //   JinyuTV.exe --bootstrap-only 只做校准后退出（供 start-server.bat 复用）
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
-using System.Management;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -817,16 +816,11 @@ class JinyuTVLauncher
 }
 
 /// <summary>
-/// 主窗口：内嵌 WebView2 承载工作台，右侧是可自动展开的「豆包窗口」侧栏。
+/// 主窗口：内嵌 WebView2 承载工作台。
+/// 豆包 RPA 浏览器**不再嵌入本窗口**，作为独立窗口弹出（见文件头说明）。
 /// </summary>
 class MainWindow : Form
 {
-    // ---- 豆包浏览器窗口的收编：RPA 启动的浏览器带这个命令行标记
-    const string RPA_MARK = "--toonflow-rpa";
-    const int HOST_WIDTH = 620;
-    /** 右侧「豆包窗口」侧栏的标题条高度（嵌入区从它下方开始） */
-    const int HOST_BAR_H = 34;
-
     // ---- 窗口边框 / 标题栏跟随软件主题
     // 用户要求：软件是深色就用深色边框，软件是浅色就用浅色边框。
     // 原生的 Windows 标题栏永远是浅色，配深色界面很突兀；这里用 DWM 把它染成与软件一致。
@@ -836,32 +830,13 @@ class MainWindow : Form
     const int DWMWA_CAPTION_COLOR = 35;
     const int DWMWA_TEXT_COLOR = 36;
 
-    // Win32（嵌入外部窗口）
-    [DllImport("user32.dll")] static extern IntPtr SetParent(IntPtr child, IntPtr parent);
-    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hwnd, int idx, int val);
-    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hwnd, int idx);
-    [DllImport("user32.dll")] static extern bool MoveWindow(IntPtr hwnd, int x, int y, int w, int h, bool repaint);
-    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hwnd);
+    // Win32（窗口几何 / 枚举）
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
-    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr param);
-    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd, StringBuilder buf, int max);
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
-    delegate bool EnumProc(IntPtr hwnd, IntPtr param);
-
-    const int GWL_STYLE = -16;
-    const int WS_CHILD = 0x40000000;
-    const int WS_POPUP = unchecked((int)0x80000000);
-    const int WS_CAPTION = 0x00C00000;
-    const int WS_THICKFRAME = 0x00040000;
 
     readonly string _dir;
     readonly string _url;
     WebView2 _web;
-    Panel _host;
-    Panel _embedArea;
-    Panel _hostBar;
-    Label _hostTitle;
     // 顶部「返回」条：只在 WebView 离开软件、加载了**外部网页**时出现。
     // 为什么需要：设置里那些外链（官方中转平台、GitHub 仓库、支付页…）是 target=_blank，
     // 而我们对 _blank 的处理是「在本窗口打开」（避免甩到找不到的浏览器窗口）。
@@ -872,7 +847,6 @@ class MainWindow : Form
     Label _navUrl;
     string _lastAppUrl = "";     // 离开软件前最后一个软件内地址，返回时用它（保留所在路由）
     string _externalUrl = "";    // 当前外部网页地址（供「用浏览器打开」）
-    System.Windows.Forms.Timer _watch;
     System.Windows.Forms.Timer _themeWatch;
     bool? _appliedDark;
     // 软件自身的深浅色（只在软件页面上取样更新）。
@@ -881,10 +855,6 @@ class MainWindow : Form
     // 所以另有一个确定性的兜底 —— 一旦离开软件，就用这个值把外壳拨回来。
     bool _appDark = true;
 
-    IntPtr _embedded = IntPtr.Zero;
-    int _embeddedStyle;
-    bool _scanning;
-    bool _userCollapsed;
     // 载入失败重试（见 RetryNavigate）：服务被外部重启时，窗口原来会一直停在浏览器的
     // 错误页（整片白），必须手动重开软件才恢复。现在改成自动重试到服务回来为止。
     bool _booted;
@@ -910,33 +880,6 @@ class MainWindow : Form
             if (ico != null) Icon = new Icon(ico);
         }
         catch { }
-
-        // 右侧「豆包窗口」侧栏（默认隐藏，检测到 RPA 浏览器时自动展开）
-        _hostBar = new Panel();
-        _hostBar.Height = HOST_BAR_H;
-        _hostBar.BackColor = Color.FromArgb(30, 30, 35);
-
-        _hostTitle = new Label();
-        _hostTitle.Text = "豆包窗口 · Ctrl+B 收起";
-        _hostTitle.ForeColor = Color.FromArgb(170, 170, 180);
-        _hostTitle.AutoSize = false;
-        _hostTitle.Dock = DockStyle.Fill;
-        _hostTitle.TextAlign = ContentAlignment.MiddleLeft;
-        _hostTitle.Padding = new Padding(12, 0, 0, 0);
-
-        _hostBar.Controls.Add(_hostTitle);
-
-        _embedArea = new Panel();
-        _embedArea.BackColor = Color.FromArgb(34, 34, 40);
-
-        _host = new Panel();
-        _host.Visible = false;
-        _host.BackColor = Color.FromArgb(34, 34, 40);
-        // _embedArea / _web 都用**显式 Bounds**（在 LayoutShell 里算），不用 Dock=Fill：
-        //   Dock=Fill 会在每次布局时把手写的 Bounds 覆盖掉，于是这两个控件铺满整个区域，
-        //   把顶部的「返回条」和侧栏标题条**盖在下面看不见**（用户报的「遮挡」）。
-        _host.Controls.Add(_embedArea);
-        _host.Controls.Add(_hostBar);
 
         _web = new WebView2();
         try { _web.DefaultBackgroundColor = JinyuTVLauncher.ShellBg; } catch { }
@@ -975,18 +918,10 @@ class MainWindow : Form
 
         Controls.Add(_web);
         Controls.Add(_navBar);
-        Controls.Add(_host);
-        // 它们与网页**不重叠**，但层级仍要明确 —— 否则会看到网页压在返回条/侧栏上面。
+        // 与网页**不重叠**，但层级仍要明确 —— 否则会看到网页压在返回条上面。
         _navBar.BringToFront();
-        _host.BringToFront();
-        _host.Resize += delegate { SyncEmbedSize(); };
 
         Load += async delegate(object s, EventArgs e) { await Boot(); };
-
-        // 定时收编豆包浏览器窗口
-        _watch = new System.Windows.Forms.Timer();
-        _watch.Interval = 2500;
-        _watch.Tick += delegate { WatchTick(); };
 
         // 定时同步主题：读页面当前深浅色，把窗口标题栏/边框染成一致的颜色
         _themeWatch = new System.Windows.Forms.Timer();
@@ -994,7 +929,7 @@ class MainWindow : Form
         _themeWatch.Tick += async delegate { await SyncTheme(); };
 
         // 尺寸必须放到控件全部建好之后再设：赋 ClientSize 会立刻触发
-        // OnSizeChanged -> LayoutShell()，若那时 _host/_web 还是 null 就抛
+        // OnSizeChanged -> LayoutShell()，若那时 _web 还是 null 就抛
         // NullReferenceException，表现为「一启动就弹『界面启动失败』」（已踩过）。
         ClientSize = new Size(1500, 920);
         LayoutShell();
@@ -1033,32 +968,25 @@ class MainWindow : Form
     void LayoutShell()
     {
         // 构造期（ClientSize / MinimumSize / AutoScaleMode 赋值）就会触发 SizeChanged，
-        // 那时控件还没建好 —— 必须保护，否则 NullReferenceException 会让软件启动即失败。
-        if (_host == null || _web == null || _hostBar == null || _navBar == null || _embedArea == null) return;
+        // 那时控件还没建好 —— 必须保护，否则NullReferenceException 会让软件启动即失败。
+        if (_web == null || _navBar == null) return;
 
         int w = ClientSize.Width, h = ClientSize.Height;
-        int hostW = _host.Visible ? Math.Min(HOST_WIDTH, Math.Max(240, w / 2)) : 0;
-        int webW = Math.Max(0, w - hostW);
         int navH = _navBar.Visible ? NAV_H : 0;   // 返回条出现时，工作台整体下移，不被遮挡
 
-        _host.Bounds = new Rectangle(w - hostW, 0, hostW, h);
-        _navBar.Bounds = new Rectangle(0, 0, webW, navH);
+        _navBar.Bounds = new Rectangle(0, 0, w, navH);
         // 网页从返回条下方开始（不是被返回条盖住上面 38px）
-        _web.Bounds = new Rectangle(0, navH, webW, Math.Max(0, h - navH));
-        // 侧栏：标题条在上，嵌入区在其下方（同样不能让标题条压住浏览器内容）
-        _hostBar.Bounds = new Rectangle(0, 0, hostW, HOST_BAR_H);
-        _embedArea.Bounds = new Rectangle(0, HOST_BAR_H, hostW, Math.Max(0, h - HOST_BAR_H));
+        _web.Bounds = new Rectangle(0, navH, w, Math.Max(0, h - navH));
 
         if (_navBar.Visible)
         {
             int top = (NAV_H - 26) / 2;
             _navBtnBack.Bounds = new Rectangle(8, top, 124, 26);
-            int browserX = Math.Max(8 + 124 + 8, webW - 132);
+            int browserX = Math.Max(8 + 124 + 8, w - 132);
             _navBtnBrowser.Bounds = new Rectangle(browserX, top, 124, 26);
             int labelX = 8 + 124 + 10;
             _navUrl.Bounds = new Rectangle(labelX, top, Math.Max(0, browserX - labelX - 10), 26);
         }
-        SyncEmbedSize();
     }
 
     // ---------------------------------------------------------------- 外部网页的返回条
@@ -1118,25 +1046,8 @@ class MainWindow : Form
         catch { }
     }
 
-    void ShowHost(bool show)
-    {
-        bool want = show && !_userCollapsed;
-        if (_host.Visible == want) return;
-        _host.Visible = want;
-        LayoutShell();
-        JinyuTVLauncher.Trace("豆包侧栏 " + (want ? "展开" : "收起"));
-    }
-
     protected override void OnKeyDown(KeyEventArgs e)
     {
-        if (e.Control && e.KeyCode == Keys.B)
-        {
-            _userCollapsed = !_userCollapsed;
-            _host.Visible = !_userCollapsed && _embedded != IntPtr.Zero;
-            LayoutShell();
-            e.Handled = true;
-            return;
-        }
         // 在外部网页里时，Alt+← 返回软件（浏览器用户的肌肉记忆）
         if (e.Alt && (e.KeyCode == Keys.Left || e.KeyCode == Keys.Back))
         {
@@ -1148,145 +1059,6 @@ class MainWindow : Form
             }
         }
         base.OnKeyDown(e);
-    }
-
-    // ---------------------------------------------------------------- 浏览器窗口收编
-
-    void WatchTick()
-    {
-        if (_scanning) return;
-        _scanning = true;
-        // WMI 查询会阻塞上百毫秒，放后台线程做，避免卡界面
-        Task.Run(delegate
-        {
-            IntPtr found = ScanForRpaWindow();
-            try
-            {
-                BeginInvoke(new Action(delegate
-                {
-                    try { ApplyScan(found); }
-                    finally { _scanning = false; }
-                }));
-            }
-            catch { _scanning = false; }
-        });
-    }
-
-    static IntPtr ScanForRpaWindow()
-    {
-        try
-        {
-            var pids = new List<int>();
-            using (var searcher = new ManagementObjectSearcher(
-                "SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name='chrome.exe' OR Name='msedge.exe'"))
-            using (var results = searcher.Get())
-            {
-                foreach (ManagementBaseObject mo in results)
-                {
-                    string cmd = mo["CommandLine"] as string;
-                    if (string.IsNullOrEmpty(cmd)) continue;
-                    if (cmd.IndexOf(RPA_MARK, StringComparison.Ordinal) < 0) continue;
-                    try { pids.Add(Convert.ToInt32(mo["ProcessId"])); } catch { }
-                }
-            }
-            foreach (int pid in pids)
-            {
-                IntPtr h = TopWindowOfPid(pid);
-                if (h != IntPtr.Zero) return h;
-            }
-        }
-        catch (Exception ex)
-        {
-            JinyuTVLauncher.Trace("扫描豆包窗口失败：" + ex.Message);
-        }
-        return IntPtr.Zero;
-    }
-
-    static IntPtr TopWindowOfPid(int pid)
-    {
-        IntPtr found = IntPtr.Zero;
-        EnumWindows(delegate(IntPtr hwnd, IntPtr p)
-        {
-            uint wpid;
-            GetWindowThreadProcessId(hwnd, out wpid);
-            if ((int)wpid != pid) return true;
-            if (!IsWindowVisible(hwnd)) return true;
-            var sb = new StringBuilder(256);
-            GetClassName(hwnd, sb, sb.Capacity);
-            if (sb.ToString().StartsWith("Chrome_WidgetWin_1", StringComparison.Ordinal))
-            {
-                found = hwnd;
-                return false;
-            }
-            return true;
-        }, IntPtr.Zero);
-        return found;
-    }
-
-    void ApplyScan(IntPtr target)
-    {
-        if (target != IntPtr.Zero)
-        {
-            if (_embedded != target) Embed(target);
-            else
-            {
-                // 每轮都强制归位：RPA 在需要用户扫码/验证时会用 CDP 把窗口
-                // 当成顶层窗口重新摆位（setWindowBounds），那会把已嵌入的窗口顶偏。
-                // 这里周期性纠正回侧栏，用户看到的始终是「就在软件里」。
-                if (!_host.Visible) ShowHost(true);
-                SyncEmbedSize();
-            }
-            return;
-        }
-        // 没扫到：只有确认已嵌入的那个窗口真的没了，才解除并收起
-        if (_embedded != IntPtr.Zero && !IsWindow(_embedded))
-        {
-            Detach();
-            ShowHost(false);
-        }
-    }
-
-    void Embed(IntPtr hwnd)
-    {
-        Detach();
-        try
-        {
-            _embeddedStyle = GetWindowLong(hwnd, GWL_STYLE);
-            SetParent(hwnd, _embedArea.Handle);
-            int style = (_embeddedStyle & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME)) | WS_CHILD;
-            SetWindowLong(hwnd, GWL_STYLE, style);
-            _embedded = hwnd;
-            JinyuTVLauncher.Trace("已将豆包窗口嵌入侧栏，句柄=" + hwnd);
-            ShowHost(true);
-            SyncEmbedSize();
-        }
-        catch (Exception ex)
-        {
-            JinyuTVLauncher.Trace("嵌入豆包窗口失败：" + ex.Message);
-            _embedded = IntPtr.Zero;
-        }
-    }
-
-    void Detach()
-    {
-        if (_embedded == IntPtr.Zero) return;
-        try
-        {
-            SetParent(_embedded, IntPtr.Zero);
-            SetWindowLong(_embedded, GWL_STYLE, _embeddedStyle);
-            JinyuTVLauncher.Trace("已解除豆包窗口嵌入");
-        }
-        catch { }
-        _embedded = IntPtr.Zero;
-    }
-
-    void SyncEmbedSize()
-    {
-        if (_embedded == IntPtr.Zero) return;
-        int w = _embedArea.ClientSize.Width, h = _embedArea.ClientSize.Height;
-        // 侧栏收起时尺寸会变成 0，此时不要改浏览器窗口尺寸（否则页面布局会被压坏）
-        if (w < 80 || h < 80) return;
-        MoveWindow(_embedded, 0, 0, w, h, true);
     }
 
     // ---------------------------------------------------------------- 窗口边框跟随主题
@@ -1349,17 +1121,12 @@ class MainWindow : Form
                 DwmSetWindowAttribute(h, DWMWA_BORDER_COLOR, ref caption, sizeof(int));
             }
 
-            // ③ 窗口底色 / WebView2 底色 / 侧栏一起跟上，避免拉伸或收起侧栏时闪出异色
+            // ③ 窗口底色 / WebView2 底色跟上，避免拉伸时闪出异色
             Color bg = dark ? JinyuTVLauncher.ShellBg : Color.FromArgb(0xF7, 0xF7, 0xF8);
             BackColor = bg;
             try { _web.DefaultBackgroundColor = bg; } catch { }
             try
             {
-                _host.BackColor = bg;
-                _embedArea.BackColor = dark ? Color.FromArgb(0x22, 0x22, 0x28) : Color.FromArgb(0xEA, 0xEA, 0xEF);
-                _hostBar.BackColor = dark ? Color.FromArgb(0x1E, 0x1E, 0x23) : Color.FromArgb(0xEE, 0xEE, 0xF2);
-                _hostTitle.ForeColor = dark ? Color.FromArgb(0xAA, 0xAA, 0xB4) : Color.FromArgb(0x55, 0x55, 0x60);
-
                 // 返回条同样跟随主题
                 Color barBg = dark ? Color.FromArgb(0x1E, 0x1E, 0x23) : Color.FromArgb(0xEE, 0xEE, 0xF2);
                 Color barFg = dark ? Color.FromArgb(0xE8, 0xE8, 0xEA) : Color.FromArgb(0x1B, 0x1B, 0x1F);
@@ -1389,9 +1156,7 @@ class MainWindow : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        _watch.Stop();
         _themeWatch.Stop();
-        Detach();
         base.OnFormClosing(e);
     }
 
@@ -1548,7 +1313,6 @@ class MainWindow : Form
                 ShowHtml(LoadingHtml("正在载入工作台…"));
                 await Task.Delay(300);
                 Navigate();
-                _watch.Start();        // 工作台起来后再开始盯豆包窗口
                 _themeWatch.Start();   // 同步窗口边框颜色
                 await Task.Delay(1500);
                 await SyncTheme();
