@@ -326,7 +326,11 @@ nodeEvent.on("delete", async () => {
 async function resizeVideo(event: Event) {
   const video = event.currentTarget as HTMLVideoElement;
   if (!video.videoWidth || !video.videoHeight) return;
-  videoWidth.value = Math.max(180, (240 * video.videoWidth) / video.videoHeight);
+  // 240 必须与 videoPlayer 的 max-height 一致，否则视频会被压出留白。
+  // +18 是 el-card 自身内边距与边框的合计（contentCard 8px×2 + 边框 1px×2）。
+  // 竖屏（9:16）按比例算出的宽度可能很窄，这里给一个下限避免节点过窄；
+  // 但**不能**给视频元素设 min-width —— 那会把盒子撑宽、又重新产生左右留白。
+  videoWidth.value = Math.max(96, (240 * video.videoWidth) / video.videoHeight);
   await nextTick();
   updateNodeInternals();
 }
