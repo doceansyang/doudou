@@ -638,6 +638,25 @@ watch(
         overflow: auto;
       }
     }
+
+    /* 浮动槽（顶部工具条 / 底部提示词卡）在 sized 状态下改用**静态流式布局**。
+       默认它们是 position:absolute，定位基准是 .nodeSkeleton；
+       而 sized 把 .nodeSkeleton 拉成了固定高度，于是槽会飘到离卡片很远的地方
+       （用户报的「下方弹窗离那么远」「加号不在中间」）。
+       改成 static + order（与原版 &.documentNode 的处理完全一致），
+       槽就重新贴在卡片上下 12px，连接柄也随卡片居中。 */
+    .floatingSlot {
+      position: static;
+      width: 100% !important;
+      transform: none;
+      align-self: center;
+
+      &.topSlot { order: 0; margin-bottom: 12px; }
+      &.bottomSlot { order: 2; margin-top: 12px; }
+    }
+
+    .titleBar { order: 1; }
+    .cardContainer { order: 1; }
   }
 
   /* 右下角缩放手柄：默认隐藏，节点被选中或鼠标悬停时出现。
