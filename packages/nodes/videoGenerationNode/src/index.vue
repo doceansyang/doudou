@@ -147,9 +147,13 @@ const generationState = useNodeGeneration(outputs, () => generationController?.a
 const { generating } = generationState;
 let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
-// ACT: 供应商未声明视频比例范围，沿用界面的通用比例，具体支持范围由供应商校验。
-const ratioOptions = ["16:9", "9:16", "1:1", "4:3", "3:4"];
 const selectedModel = computed(() => models.value.find((item) => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
+// 比例**必须由模型声明**（`videoRatios`）—— 各模型的差异很大：
+//   Seedance 2.0 有 21:9、Wan 3.0 有 adaptive、Grok 是常规档，
+//   写死一份公共列表会让用户选到模型其实不支持的比例，提交上去才失败。
+// 模型没声明时回退到一组保守默认值（旧供应商文件不会因此变空）。
+const fallbackRatios = ["16:9", "9:16", "1:1", "4:3", "3:4"];
+const ratioOptions = computed(() => (selectedModel.value?.videoRatios?.length ? selectedModel.value.videoRatios : fallbackRatios));
 const selectedMode = computed(() => selectedModel.value?.mode?.find((item) => JSON.stringify(item) === data.value.mode) as NodeVideoRequest["mode"]);
 const frameMode = computed(() => ["startEndRequired", "endFrameOptional", "startFrameOptional"].includes(String(selectedMode.value)));
 const mediaCounts = computed(() => ({
@@ -198,7 +202,7 @@ watch([selectedModel, () => data.value.duration], ([choice]) => {
   if (!durations.includes(data.value.duration!)) data.value.duration = durations[0];
   const resolutions = getResolutions(choice, data.value.duration);
   if (!resolutions.includes(data.value.resolution)) data.value.resolution = resolutions[0] ?? "";
-  if (!ratioOptions.includes(data.value.ratio)) data.value.ratio = "9:16";
+  if (!ratioOptions.value.includes(data.value.ratio)) data.value.ratio = ratioOptions.value.includes("9:16") ? "9:16" : ratioOptions.value[0]!;
   if (choice.audio !== "optional") data.value.generateAudio = choice.audio === true;
 }, { flush: "sync" });
 const modelGroups = computed(() => groupNodeModels(models.value));
@@ -380,7 +384,13 @@ nodeTools.register({
     modelId: z.string().min(1).optional(),
     duration: z.number().positive().optional(),
     resolution: z.string().min(1).optional(),
-    ratio: z.enum(ratioOptions).optional(),
+    // ⚠️ 这里**不能**写 `z.enum(ratioOptions)`。比例改成按模型声明（computed）之后，
+    //    zod 拿到的是一个 Vue ref 而不是字符串数组 —— `z.toJSONSchema()` 会直接抛
+    //    "Error converting schema to JSON."，而报错发生在**运行注册节点时**，
+    //    整个视频生成节点在画布上变成一块 error 卡片。
+    //    zod schema 是模块加载时静态构建的，接不住动态能力，所以：
+    //    这里只做「非空字符串」的粗校验，真正的范围校验放到 execute 里按当前模型判。
+    ratio: z.string().min(1).optional(),
     mode: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
     generateAudio: z.boolean().optional(),
   }).refine((args) => (args.providerId === undefined) === (args.modelId === undefined), "providerId 与 modelId 必须同时提供"),
@@ -401,6 +411,8 @@ nodeTools.register({
     const resolution = args.resolution ?? (resolutions.includes(data.value.resolution) ? data.value.resolution : resolutions[0] ?? "");
     if (args.mode !== undefined && !getMatchingModes(choice).some((item) => JSON.stringify(item) === JSON.stringify(args.mode))) throw new Error("所选模式不受当前模型支持或不适用于当前引用，请根据模型能力及已连接素材选择");
     if (args.generateAudio !== undefined && choice.audio !== "optional" && args.generateAudio !== (choice.audio === true)) throw new Error("当前模型不支持切换声音，请查看 getConfig 返回的 audio 能力");
+    // 比例的范围校验（原先是写死在 zod schema 里的静态列表，现在按模型声明判）。
+    if (args.ratio !== undefined && !ratioOptions.value.includes(args.ratio)) throw new Error(`当前模型不支持比例 ${args.ratio}，可选：${ratioOptions.value.join("、")}`);
     data.value.model = JSON.stringify([choice.providerId, choice.modelId]);
     data.value.duration = duration;
     data.value.resolution = resolution;

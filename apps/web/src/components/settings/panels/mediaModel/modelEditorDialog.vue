@@ -55,6 +55,12 @@
               <el-radio :value="false">无音频</el-radio>
             </el-radio-group>
           </el-form-item>
+          <el-form-item label="画面比例">
+            <div class="ratioEditor">
+              <el-input-tag v-model="draft.videoRatios" placeholder="输入如 16:9 后按回车" aria-label="视频画面比例" />
+              <span class="fieldHint">节点上的比例选项直接来自这里；留空则回退到 16:9 / 9:16 / 1:1 / 4:3 / 3:4。</span>
+            </div>
+          </el-form-item>
           <el-form-item label="时长与分辨率" required>
             <div class="mappingEditor">
               <div class="mappingHeader"><span>时长（秒）</span><span>分辨率</span></div>
@@ -134,6 +140,7 @@ function createDraft() {
     mixedModeCount: { videoReference: 1, imageReference: 1, audioReference: 1 } as Record<string, number | undefined>,
     audio: "optional" as "optional" | boolean,
     durationResolutionMap: [{ duration: [] as string[], resolution: [] as string[] }],
+    videoRatios: [] as string[],
   };
 }
 
@@ -174,8 +181,13 @@ watch(visible, (isVisible) => {
         resolution: Array.isArray(row?.resolution) ? row.resolution.map(String) : [],
       }));
     }
+    // 视频比例：模型声明什么，节点就显示什么（图片侧早有 imageRatios，视频侧此前没有）。
+    if (Array.isArray(extra.videoRatios) && extra.videoRatios.length) {
+      draft.value.videoRatios = extra.videoRatios.map(value => String(value));
+    }
     delete extra.audio;
     delete extra.durationResolutionMap;
+    delete extra.videoRatios;
   }
   options.value = JSON.stringify(extra, null, 2);
   initialDraft = JSON.parse(JSON.stringify(draft.value));
@@ -193,12 +205,12 @@ function confirmModel() {
     try { extra = JSON.parse(options.value); }
     catch { throw new Error("更多配置不是有效的 JSON"); }
     if (!extra || typeof extra !== "object" || Array.isArray(extra)) throw new Error("更多配置必须是 JSON 对象");
-    const fields = ["id", "label", "type", ...(draft.value.type === "video" ? ["audio", "durationResolutionMap"] : [])];
+    const fields = ["id", "label", "type", ...(draft.value.type === "video" ? ["audio", "durationResolutionMap", "videoRatios"] : [])];
     if (fields.some(field => field in extra)) throw new Error("已有表单项请直接在上方编辑");
     const value: MediaProviderModel = { ...extra, id, label, type: draft.value.type };
     const typeChanged = !model || value.type !== model.type;
     const changed = (...fields: (keyof typeof initialDraft)[]) => typeChanged || fields.some(field => JSON.stringify(draft.value[field]) !== JSON.stringify(initialDraft[field]));
-    const modelFields = value.type === "image" ? ["mode"] : value.type === "video" ? ["mode", "audio", "durationResolutionMap"] : [];
+    const modelFields = value.type === "image" ? ["mode"] : value.type === "video" ? ["mode", "audio", "durationResolutionMap", "videoRatios"] : [];
     if (!typeChanged) for (const field of modelFields) if (field in original) value[field] = original[field];
     const modeChanged = changed(value.type === "image" ? "imageMode" : "videoMode", "mixedMode", "mixedModeCount") || JSON.stringify(extra.mode) !== JSON.stringify(initialExtraMode);
     if ((value.type === "image" || value.type === "video") && modeChanged) {
@@ -226,6 +238,15 @@ function confirmModel() {
         if (!resolution.length || resolution.some(value => !value)) throw new Error(`请填写第 ${index + 1} 组分辨率`);
         return { duration, resolution };
       });
+    }
+    if (value.type === "video" && changed("videoRatios")) {
+      const ratios = draft.value.videoRatios.map(item => item.trim()).filter(Boolean);
+      for (const ratio of ratios) {
+        if (!/^[1-9]\d{0,3}:[1-9]\d{0,3}$/.test(ratio)) throw new Error(`比例格式应为「宽:高」，如 16:9；收到：${ratio}`);
+      }
+      // 比例可以为空 —— 节点会回退到一组保守默认值，所以这里不强制必填。
+      if (ratios.length) value.videoRatios = [...new Set(ratios)];
+      else delete value.videoRatios;
     }
     emit("confirmed", value);
     visible.value = false;
@@ -288,6 +309,15 @@ function confirmModel() {
     }
 
     .addMapping { width: 100%; margin-top: 4px; }
+  }
+
+  .ratioEditor {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    .fieldHint { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; }
   }
 
   .modelOptions {

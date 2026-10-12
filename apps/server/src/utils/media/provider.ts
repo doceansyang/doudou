@@ -303,17 +303,37 @@ export async function refreshMediaProviderModels(fileName: string, revision?: st
   const result = z.object({ data: z.array(mediaModelsSchema.element.partial({ label: true, type: true })).max(2000) }).parse(await response.json());
   if (!result.data.length) throw new Error("未获取到媒体模型，保留原有列表");
   const requestedType = z.enum(["text", "image", "video", "audio"]).safeParse(modelsUrl.searchParams.get("type"));
-  const models = result.data.map(model => {
+  // 网关（new-api）**根本不返回 type**，而且**忽略 ?type= 参数** —— 实测
+  // `/v1/models?type=` 传 video / image / text / audio 四种值，返回的是同一批 id。
+  // 所以「这个 id 属于什么类型」只能靠**本地清单**判定，绝不能拿 URL 参数兜底。
+  const unknown: string[] = [];
+  const models = result.data.flatMap(model => {
     const id = model.id.trim();
     const previous = provider.models.find(item => item.id === id)
       ?? (provider.id === JinyuDream.id ? JinyuDream.models.find(item => item.id === id) : undefined);
-    const type = model.type ?? (requestedType.success ? requestedType.data : previous?.type);
-    if (!type) invalid(t`模型 ${id} 缺少 type，请在返回数据或 modelsUrl 的 type 参数中指定`);
-    if (requestedType.success && type !== requestedType.data) invalid(t`模型 ${id} 的 type 与请求类型不一致`);
+    // ⚠️ 优先级必须是「网关显式声明 → 本地已知分类 → URL 的 type 参数」。
+    //    原来是 `model.type ?? (requestedType ?? previous?.type)`，把 URL 参数置于本地分类之前，
+    //    后果：每次按 ?type=video 刷新时，文本模型 deepseek-flash、图片模型 gpt-image-2
+    //    统统被贴上 video 标签，直接出现在**视频节点**的模型下拉里（用户看到的"乱放"就是这个）。
+    const type = model.type ?? previous?.type ?? (requestedType.success ? requestedType.data : undefined);
+    // 没有分类依据就**跳过**，不要猜：宁可这个模型暂时不出现，也不能让文本模型出现在视频节点里。
+    if (!type) {
+      unknown.push(id);
+      return [];
+    }
+    // 本次只刷新某一类型时，其它类型交给对应的那一轮去处理。
+    if (requestedType.success && type !== requestedType.data) return [];
     // ACT: 只有 ID 的列表沿用同名模型参数，新模型不猜测生成能力。
-    return { ...previous, ...model, id, label: model.label ?? previous?.label
-      ?? (typeof model.display_name === "string" ? model.display_name : typeof model.displayName === "string" ? model.displayName : id), type };
+    return [{ ...previous, ...model, id, label: model.label ?? previous?.label
+      ?? (typeof model.display_name === "string" ? model.display_name : typeof model.displayName === "string" ? model.displayName : id), type }];
   });
+  if (unknown.length) {
+    if (!models.length) invalid(t`以下模型缺少类型声明，无法归类：${unknown.join("、")}`);
+    console.warn(`[media] ${provider.id} 有 ${unknown.length} 个模型无法归类，已跳过：${unknown.join("、")}`);
+  }
+  // 一条都没匹配上（例如网关本来就没有该类型的模型）→ 保留原文件，这不算错误。
+  //   原来这里会连同 `types` 一起把该类型的老模型全删掉，是另一个静默丢数据的口子。
+  if (!models.length) return provider;
   const types = new Set(models.map(model => model.type));
   return saveMediaProvider(fileName, [...provider.models.filter(model => !types.has(model.type)), ...models], provider.revision, apiKey);
 }

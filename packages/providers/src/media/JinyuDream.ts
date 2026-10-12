@@ -9,7 +9,26 @@ const rules = [
 ];
 
 const apiUrl = "https://api.linke.link/v1";
-const version = "2.0.1";
+const version = "2.0.2";
+
+/*
+ * ────────────────────────────────────────────────────────────────────────────
+ *  这份 models 清单是 Linke（api.linke.link，new-api 网关）的**权威分类表**。
+ *
+ *  为什么必须手写、不能靠自动获取分类：
+ *    `GET /v1/models` 是**全量**返回，而且
+ *      · 不返回 type —— 6 条里只有 `gpt-image-2` 带了一个 `supported_endpoint_types:
+ *        ["image-generation","openai"]`，其余全是 `["openai"]`，分辨不出是文本还是视频；
+ *      · **忽略 `?type=` 参数** —— 传 video / image / text / audio 四种值，
+ *        返回的是同一批 6 个 id（实测）。
+ *    所以「哪个 id 属于哪一类」在网关侧没有答案，只能由这张表提供。
+ *    服务端刷新逻辑（refreshMediaProviderModels）会把它当作**已知分类**优先使用，
+ *    未知 id 一律跳过、绝不猜测 —— 否则文本模型 deepseek-flash 会被塞进视频节点。
+ *
+ *  这张表只放**媒体**模型（image / video / audio）。
+ *  大语言模型（deepseek-flash）属于文本侧，见 src/language/JinyuDream.ts。
+ * ────────────────────────────────────────────────────────────────────────────
+ */
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Linke 响应格式错误");
@@ -32,7 +51,7 @@ async function fetchJson(context: ProviderContext, path: string, body?: unknown,
     body: JSON.stringify(body),
     signal,
   });
-  if (!response.ok) throw new Error(`Linke 请求失败（HTTP ${response.status}）`);
+  if (!response.ok) throw new Error(context.tool.errorMessage?.(await response.clone().json().catch(() => null)) || `Linke 请求失败（HTTP ${response.status}）`);
   return object(await response.json());
 }
 
@@ -43,25 +62,6 @@ function mediaUrl(input: MediaInput) {
   }
   const data = input.type === "binary" ? Buffer.from(input.data).toString("base64") : input.data;
   return data.startsWith("data:") ? data : `data:${input.mimeType};base64,${data}`;
-}
-
-function audioReference(input: MediaInput, mediaType: "image" | "audio") {
-  if (input.mimeType && !input.mimeType.startsWith(`${mediaType}/`)) throw new Error(`参考媒体类型须为 ${mediaType}`);
-  if (input.type === "url") return { [`${mediaType}_url`]: mediaUrl(input) };
-  const match = /^data:([^;,]+);base64,([\s\S]+)$/.exec(mediaUrl(input));
-  if (!match || !match[1].startsWith(`${mediaType}/`)) throw new Error(`参考媒体类型须为 ${mediaType}`);
-  const data = match[2].replace(/\s/g, "");
-  if (!data || !/^[a-zA-Z0-9+/]+={0,2}$/.test(data) || data.length % 4 === 1) throw new Error("参考媒体的 base64 内容无效");
-  return { [`${mediaType}_data`]: data };
-}
-
-function mediaAsset(value: unknown, mediaType: MediaAsset["mediaType"], mimeType?: string): MediaAsset[] {
-  if (typeof value !== "string" || !value.trim()) throw new Error("Linke 未返回生成结果");
-  const url = value.trim();
-  if (/^https?:\/\//i.test(url)) return [{ mediaType, type: "url", url, ...(mimeType ? { mimeType } : {}) }];
-  const data = /^data:([^;,]+);base64,([\s\S]+)$/.exec(url);
-  if (!data || !data[1].startsWith(`${mediaType}/`)) throw new Error("Linke 返回的媒体地址无效");
-  return [{ mediaType, type: "base64", mimeType: data[1], data: data[2] }];
 }
 
 function wait(signal: AbortSignal) {
@@ -79,23 +79,135 @@ function wait(signal: AbortSignal) {
   });
 }
 
-async function generateTask(context: ProviderContext, mediaType: "image" | "video" | "audio", body: unknown, mimeType?: string) {
-  // ACT: 单次生成最多等待 30 分钟；供应商开放任务恢复能力后再单独保存任务 ID。
-  const signal = AbortSignal.any([AbortSignal.timeout(30 * 60_000), ...(context.signal ? [context.signal] : [])]);
-  const path = mediaType === "audio" ? "tts" : mediaType;
-  const name = { image: "Image", video: "Video", audio: "Audio" }[mediaType];
-  const task = await fetchJson(context, `${path}/${mediaType === "audio" ? "create" : `generate${name}`}`, body, signal);
-  if (typeof task.data !== "string" || !task.data.trim()) throw new Error("Linke 未返回任务 ID");
+/** 终态判定用的状态词。new-api 各分支大小写不统一（SUCCESS / succeeded / COMPLETED…），统一转大写比较。 */
+const doneStates = ["SUCCESS", "SUCCEEDED", "COMPLETED", "DONE", "FINISHED"];
+const failedStates = ["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "REJECTED"];
+
+/**
+ * 从任务响应里取出媒体地址。
+ *
+ * ⚠️ 为什么不是取固定字段：这个网关的返回结构**嵌套层数不固定**，
+ *    `GET /v1/video/generations/{id}` 返回 `{code,data:{status,…,data:{…}}}`，
+ *    而 `GET /v1/videos/{id}` 是 OpenAI-videos 风格的扁平对象。写死一条路径
+ *    必然在另一条上取到 undefined。做法改成「先试常见路径，再全量扫描找媒体 URL」，
+ *    这样换网关 / 网关升级都不会静默变成"没返回地址"。
+ */
+function pickMediaUrl(payload: unknown, mediaType: "image" | "video" | "audio", depth = 0): string | undefined {
+  if (depth > 8 || payload == null) return undefined;
+  if (typeof payload === "string") {
+    const value = payload.trim();
+    if (/^https?:\/\//i.test(value)) return value;
+    if (/^data:[^;]+;base64,/i.test(value)) return value;
+    return undefined;
+  }
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const hit = pickMediaUrl(item, mediaType, depth + 1);
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+  if (typeof payload !== "object") return undefined;
+  const data = payload as Record<string, unknown>;
+
+  // new-api 视频任务里视频地址的常见字段名；`result_url` 是这个网关在
+  // 任务对象顶层直接给的快捷字段（实测 `GET /v1/video/generations/{id}` 里有），
+  // `works` 是 new-api 自己的视频产物数组约定。
+  for (const key of ["result_url", "resultUrl", "url", "video_url", "videoUrl", "image_url", "imageUrl", "audio_url", "outputUrl", "fileUrl", "downloadUrl"]) {
+    const hit = pickMediaUrl(data[key], mediaType, depth + 1);
+    if (hit) return hit;
+  }
+  const preference: Record<string, string[]> = {
+    video: ["works", "output", "videos", "results", "data", "result", "content", "task"],
+    image: ["data", "images", "output", "results", "result", "content", "task"],
+    audio: ["data", "audios", "output", "results", "result", "content", "task"],
+  };
+  for (const key of preference[mediaType] ?? []) {
+    const hit = pickMediaUrl(data[key], mediaType, depth + 1);
+    if (hit) return hit;
+  }
+  // 兜底：任何键都扫一遍（顺序不影响结果，只是慢一点）。
+  for (const value of Object.values(data)) {
+    const hit = pickMediaUrl(value, mediaType, depth + 1);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+function failReason(payload: unknown, fallback: string, depth = 0): string {
+  if (depth > 6 || payload == null) return "";
+  if (typeof payload === "string") return payload.trim();
+  if (typeof payload !== "object") return "";
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const hit = failReason(item, fallback, depth + 1);
+      if (hit) return hit;
+    }
+    return "";
+  }
+  const data = payload as Record<string, unknown>;
+  for (const key of ["fail_reason", "failReason", "failure_reason", "error", "errors", "message", "msg", "detail", "details"]) {
+    const hit = failReason(data[key], fallback, depth + 1);
+    if (hit && hit !== fallback) return hit;
+  }
+  return "";
+}
+
+function taskIdOf(payload: Record<string, unknown>): string {
+  for (const key of ["task_id", "id", "taskId", "request_id", "requestId"]) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  const data = payload.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) return taskIdOf(data as Record<string, unknown>);
+  return "";
+}
+
+/**
+ * 提交任务 → 轮询到终态。
+ *
+ * 网关（new-api）的协议是异步的：POST 拿 task_id，GET 查状态，
+ * **和原版 Toonflow 私有后端那套 `video/generateVideo` + `video/getVideoStatus`
+ * 完全不同**（那两条路径在这个域名上都是 404），所以这里整体重写过。
+ */
+async function generateTask(context: ProviderContext, mediaType: "image" | "video" | "audio", path: string, body: unknown, signal: AbortSignal) {
+  const submitted = await fetchJson(context, path, body, signal);
+  // 有的网关对图片是**同步**返回（OpenAI `/v1/images/generations` 就是），
+  // 提交响应里直接带地址，这时不该再去轮询一个不存在的任务。
+  const inline = pickMediaUrl(submitted, mediaType);
+  if (inline) return inline;
+  const taskId = taskIdOf(submitted);
+  if (!taskId) throw new Error("Linke 未返回任务 ID");
+  const name = { image: "图片", video: "视频", audio: "音频" }[mediaType];
   while (true) {
-    const result = await fetchJson(context, `${path}/get${name}Status`, { taskICode: task.data }, signal);
-    const data = result.data == null ? {} : object(result.data);
-    const status = String(result.status ?? data.status ?? "").toLowerCase();
-    if (status === "success" || status === "completed") return mediaAsset(data.data, mediaType, mimeType);
-    if (["failed", "failure", "error", "rejected"].includes(status)) {
-      throw new Error(context.tool.errorMessage?.(result) || (typeof data.failReason === "string" ? data.failReason : `${{ image: "图片", video: "视频", audio: "音频" }[mediaType]}生成失败`));
+    const result = await fetchJson(context, `${path}/${encodeURIComponent(taskId)}`, undefined, signal);
+    const data = result.data && typeof result.data === "object" && !Array.isArray(result.data) ? result.data as Record<string, unknown> : {};
+    const status = String(data.status ?? result.status ?? "").toUpperCase();
+    if (doneStates.includes(status)) {
+      const url = pickMediaUrl(result, mediaType);
+      if (!url) throw new Error(`Linke 任务已完成，但没有返回${name}地址`);
+      return url;
+    }
+    if (failedStates.includes(status)) {
+      throw new Error(context.tool.errorMessage?.(result) || failReason(result, "") || `Linke ${name}生成失败`);
     }
     await wait(signal);
   }
+}
+
+/**
+ * gpt-image-2 的 size 只接受 WxH（每边为 16 的倍数、长短边比 ≤ 3:1、
+ * 总像素 655,360–8,294,400），不接受 "1K"/"2K" 这类档位名。
+ * 这里把节点上的「档位 + 比例」换算成合法像素尺寸。
+ */
+const imageSizes: Record<string, Record<string, string>> = {
+  "1K": { "1:1": "1024x1024", "3:2": "1536x1024", "2:3": "1024x1536" },
+  "2K": { "1:1": "2048x2048", "3:2": "2400x1600", "2:3": "1600x2400" },
+};
+
+function resolveImageSize(size: string | undefined, ratio: string | undefined) {
+  const tier = imageSizes[(size ?? "1K").toUpperCase()] ?? imageSizes["1K"]!;
+  return tier[ratio ?? "1:1"] ?? tier["1:1"]!;
 }
 
 export default {
@@ -103,223 +215,130 @@ export default {
   label: "Linke",
   version,
   apiUrl,
-  modelsUrl: "https://api.linke.link/v1/models?type=video",
+  // ⚠️ 不带 `?type=`：网关忽略这个参数（四种 type 返回同一批 id），
+  //    带了反而会让人误以为「服务端已经按类型过滤好了」。
+  //    分类由本文件的 models 清单负责。
+  modelsUrl: "https://api.linke.link/v1/models",
   protocol: "openai-completions",
-  readme: "## JinyuTV 官方中转平台\n\n提供文本、图像、视频、音频等多模态模型服务。\n\n[前往中转平台](https://api.linke.link/)",
+  readme: "## JinyuTV 官方中转平台\n\n提供文本、图像、视频等多模态模型服务。\n\n[前往中转平台](https://api.linke.link/)",
   rules,
   models: [
-    { id: "seed-audio-1.0", label: "Seed Audio 1.0", type: "audio" },
     {
-      id: "Seedance 2.5",
-      label: "Seedance-2.5",
+      id: "seedance-2",
+      label: "Seedance 2.0",
       type: "video",
-      mode: ["text", "startFrameOptional", ["imageReference:30", "videoReference:10", "audioReference:10"]],
+      mode: ["text", "startFrameOptional", ["imageReference:9", "videoReference:3", "audioReference:3"]],
       audio: "optional",
+      videoRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
       durationResolutionMap: [
         {
-          duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+          duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
           resolution: ["480p", "720p", "1080p"],
         },
       ],
     },
     {
-      id: "Seedance 2.0",
-      label: "Seedance-2.0",
+      id: "seedance-2-mini",
+      label: "Seedance 2.0 Mini",
       type: "video",
       mode: ["text", "startFrameOptional", ["imageReference:9", "videoReference:3", "audioReference:3"]],
       audio: "optional",
-      durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p"] }],
+      videoRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+      durationResolutionMap: [
+        {
+          duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+          resolution: ["480p", "720p", "1080p"],
+        },
+      ],
     },
     {
-      id: "Seedance 2.0 fast",
-      label: "Seedance 2.0 fast",
+      id: "grok-video-1.5",
+      label: "Grok Video 1.5",
       type: "video",
-      mode: ["text", "startFrameOptional", ["imageReference:9", "videoReference:3", "audioReference:3"]],
-      audio: "optional",
-      durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p"] }],
+      // Grok Imagine 1.5：文生视频 + 单图（首帧）。不做多参考 —— 官方参考图走的是
+      // 另一个模型档位，未确认这个 id 在网关上是否放开，先不声明，避免用户选到会失败的模式。
+      mode: ["text", "singleImage"],
+      audio: true,
+      videoRatios: ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3", "21:9"],
+      durationResolutionMap: [
+        { duration: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p", "1080p"] },
+      ],
     },
     {
-      id: "Seedance 2.0 mini",
-      label: "Seedance 2.0 mini",
-      type: "video",
-      mode: ["text", "startFrameOptional", ["imageReference:9", "videoReference:3", "audioReference:3"]],
-      audio: "optional",
-      durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p"] }],
-    },
-    {
-      id: "wan-3.0",
-      label: "Wan3.0",
+      id: "wan3.0-video",
+      label: "Wan 3.0",
       type: "video",
       mode: ["text", "startFrameOptional", ["imageReference:10", "videoReference:5", "audioReference:5"]],
-      audio: "optional",
+      audio: true,
+      videoRatios: ["16:9", "9:16", "1:1", "4:3", "3:4"],
       durationResolutionMap: [
         {
-          duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+          duration: [
+            2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+          ],
           resolution: ["480p", "720p", "1080p"],
         },
       ],
     },
     {
-      id: "MiniMax-H3",
-      label: "MiniMax-H3",
-      type: "video",
-      mode: ["text", "startFrameOptional", ["imageReference:9", "audioReference:3"]],
-      durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "768p"] }],
-      audio: true,
-    },
-    {
-      id: "doubao-seedream-5.0-Pro",
-      label: "Doubao Seedream 5.0 Pro",
+      id: "gpt-image-2",
+      label: "GPT Image 2",
       type: "image",
-      mode: ["text", "singleImage", "multiReference"],
-      imageSizes: ["1K", "1.5K", "2K"],
-      imageRatios: ["16:9", "9:16"],
-    },
-    {
-      id: "doubao-seedream-5.0-Lite",
-      label: "Doubao Seedream 5.0 Lite",
-      type: "image",
-      mode: ["text", "singleImage", "multiReference"],
-      imageSizes: ["2K", "3K", "4K"],
-      imageRatios: ["16:9", "9:16"],
-    },
-    {
-      id: "全能图片G-2.5",
-      label: "全能图片G-2.5",
-      type: "image",
-      mode: ["text", "singleImage", "multiReference"],
-      imageSizes: ["1K", "2K", "4K"],
-      imageRatios: ["1:1", "9:16", "16:9", "3:4", "4:3", "3:2", "2:3", "21:9"],
-    },
-    {
-      id: "全能图片G-2.0",
-      label: "全能图片G-2.0",
-      type: "image",
-      mode: ["text", "singleImage", "multiReference"],
-      imageSizes: ["1K", "2K", "4K"],
-      imageRatios: ["1:1", "9:16", "16:9", "3:4", "4:3", "3:2", "2:3", "21:9"],
+      mode: ["text", "singleImage"],
+      imageSizes: ["1K", "2K"],
+      imageRatios: ["1:1", "3:2", "2:3"],
     },
   ] satisfies ProviderModel[],
-  async generateAudio(request: AudioRequest): Promise<MediaAsset[]> {
-    const text = (request.text ?? request.prompt ?? "").trim();
-    if (!text) throw new Error("请输入音频生成文本");
-    const format = request.format ?? "mp3";
-    const mimeTypes: Record<string, string> = { wav: "audio/wav", mp3: "audio/mpeg", pcm: "audio/pcm", ogg_opus: "audio/ogg" };
-    if (!Object.hasOwn(mimeTypes, format)) throw new Error("Linke 音频格式仅支持 wav、mp3、pcm、ogg_opus");
-    const sampleRate = request.sampleRate ?? 24000;
-    if (![8000, 16000, 22050, 24000, 32000, 44100, 48000].includes(sampleRate)) throw new Error("Linke 音频采样率须为 8000、16000、22050、24000、32000、44100 或 48000 Hz");
-    const speed = request.speed ?? 1;
-    if (!Number.isFinite(speed) || speed < 0.5 || speed > 2) throw new Error("Linke 音频语速须在 0.5 到 2 倍之间");
-    const volume = request.volume ?? 0;
-    const volumeLimit = 20 * Math.log10(2);
-    if (!Number.isFinite(volume) || volume < -volumeLimit || volume > volumeLimit) throw new Error("Linke 音量增益须在约 -6.02 到 6.02 dB 之间");
-    const pitch = request.pitch ?? 0;
-    if (!Number.isFinite(pitch) || pitch < -12 || pitch > 12) throw new Error("Linke 音调偏移须在 -12 到 12 之间");
-    const references = [
-      ...(request.audios ?? []).map(input => audioReference(input, "audio")),
-      ...(request.images ?? []).map(input => audioReference(input, "image")),
-    ];
-    return generateTask(this, "audio", {
-      model: request.model,
-      text,
-      format,
-      ...(references.length ? { references } : {}),
-      sampleRate,
-      speechRate: Math.round((speed - 1) * 100),
-      loudnessRate: Math.round((10 ** (volume / 20) - 1) * 100),
-      pitchRate: pitch,
-    }, mimeTypes[format]);
-  },
   async generateImage(request: ImageRequest): Promise<MediaAsset[]> {
-    const model = request.model.toLowerCase();
+    const signal = AbortSignal.any([AbortSignal.timeout(10 * 60_000), ...(this.signal ? [this.signal] : [])]);
     const images = (request.images ?? []).map(mediaUrl);
-    const size = (request.size ?? "2K").toUpperCase();
-    const ratio = request.ratio ?? "16:9";
-    // if (!["1K", "2K", "4K"].includes(size)) throw new Error("Linke 图片尺寸仅支持 1K、2K、4K");
-
-    let metadata: Record<string, unknown>;
-    let resolvedSize: string;
-    if (model.includes("doubao") || model.includes("seedream")) {
-      resolvedSize = size.toLowerCase();
-      if (!resolvedSize) throw new Error("Linke Seedream 适配仅支持 16:9、9:16");
-      metadata = { response_format: "url", aspectRatio: ratio, sequential_image_generation: "disabled", stream: false, watermark: false };
-    } else if (model.includes("gpt") || model.includes("全能图片")) {
-      resolvedSize = size.toLowerCase();
-      metadata = { aspectRatio: ratio };
-    } else {
-      resolvedSize = size.toLowerCase();
-      metadata = { aspectRatio: ratio };
-    }
-    return generateTask(this, "image", {
+    const body: Record<string, unknown> = {
       model: request.model,
       prompt: request.prompt,
-      size: resolvedSize,
-      ...(images.length ? { images } : {}),
-      metadata,
-    });
+      size: resolveImageSize(request.size, request.ratio),
+      n: request.n ?? 1,
+      // gpt-image-2 不接受 input_fidelity（它恒定高保真），照 OpenAI 规范省略。
+      ...(request.quality ? { quality: request.quality } : {}),
+      ...(images.length ? { image: images.length === 1 ? images[0] : images } : {}),
+    };
+    const url = await generateTask(this, "image", "images/generations", body, signal);
+    return [{ mediaType: "image", type: "url", url }];
   },
   async generateVideo(request: VideoRequest): Promise<MediaAsset[]> {
-    const model = request.model.toLowerCase();
+    const signal = AbortSignal.any([AbortSignal.timeout(30 * 60_000), ...(this.signal ? [this.signal] : [])]);
     const images = (request.images ?? []).map(mediaUrl);
     const videos = (request.videos ?? []).map(mediaUrl);
     const audios = (request.audios ?? []).map(mediaUrl);
-    const frames = [
-      ...(request.firstFrame ? [{ url: mediaUrl(request.firstFrame), role: "first_frame" }] : []),
-      ...(request.lastFrame ? [{ url: mediaUrl(request.lastFrame), role: "last_frame" }] : []),
-    ];
-    const mode = request.mode ?? (frames.length ? "endFrameOptional" : videos.length || audios.length ? [] : images.length ? "singleImage" : "text");
-    const isFrames = mode === "startEndRequired" || mode === "endFrameOptional" || mode === "startFrameOptional";
-    const frameImages = frames.length ? frames : images.map((url, index) => ({ url, role: index === 0 ? "first_frame" : "last_frame" }));
-    const imageRefs = isFrames ? frameImages.map((item) => item.url) : images;
-    const ratio = request.ratio ?? "16:9";
-    let metadata: Record<string, unknown>;
+    // 首尾帧只在**帧模式**下才取。之前无条件用 images[0]/images[1] 兜底，
+    // 结果「混合参考」模式会同时发出 first_frame_url + last_frame_url + references ——
+    // 同一批图既当首尾帧又当参考素材，上游只会报参数冲突（干跑实测就是这个形状）。
+    const isFrameMode = request.mode === "startEndRequired" || request.mode === "endFrameOptional" || request.mode === "startFrameOptional";
+    const firstFrame = request.firstFrame ? mediaUrl(request.firstFrame) : isFrameMode ? images[0] : undefined;
+    const lastFrame = request.lastFrame ? mediaUrl(request.lastFrame) : isFrameMode ? images[1] : undefined;
 
-    if (model.includes("kling")) {
-      metadata = {
-        aspect_ratio: ratio,
-        sound: request.generateAudio ? "on" : "off",
-        video_list: videos.map((url) => ({ video_url: url })),
-        image_list: [],
-      };
-
-      if (model.includes("omni") || model.includes("o1")) {
-        metadata.image_list = isFrames
-          ? frameImages.map(({ url, role }) => ({ image_url: url, type: role === "first_frame" ? "first_frame" : "end_frame" }))
-          : images.map((url) => ({ image_url: url }));
-      } else {
-        if (imageRefs[0]) metadata.image = imageRefs[0];
-        if (isFrames && imageRefs[1]) metadata.image_tail = imageRefs[1];
+    // 首尾帧 / 参考素材统一放进 metadata，具体字段名各上游不一致，
+    // 这里同时给出两套常见写法（first_frame_url/last_frame_url 与 image_with_roles），
+    // 由上游取它认识的那个 —— 比只发一套然后报"参数缺失"要好。
+    const references: Record<string, unknown>[] = [];
+    if (Array.isArray(request.mode)) {
+      for (const [kind, urls] of [["image", images], ["video", videos], ["audio", audios]] as const) {
+        references.push(...urls.map(url => ({ role: `reference_${kind}`, type: `${kind}_url`, [`${kind}_url`]: { url } })));
       }
-    } else if (model.includes("grok")) {
-      metadata = { aspectRatio: ratio };
-    } else {
-      const references: Record<string, unknown>[] = [];
-      if (Array.isArray(mode)) {
-        for (const [type, urls] of [
-          ["image", images],
-          ["video", videos],
-          ["audio", audios],
-        ] as const) {
-          references.push(...urls.map((url) => ({ role: `reference_${type}`, type: `${type}_url`, [`${type}_url`]: { url } })));
-        }
-      } else if (isFrames) {
-        references.push(...frameImages.map(({ url, role }) => ({ role, type: "image_url", image_url: { url } })));
-      } else if (mode === "singleImage") {
-        references.push(...images.map((url) => ({ role: "reference_image", type: "image_url", image_url: { url } })));
-      }
-      metadata = {
-        ...(typeof request.generateAudio === "boolean" ? { generate_audio: request.generateAudio } : {}),
-        ratio,
-        references,
-        resolution: request.resolution,
-      };
     }
-    return generateTask(this, "video", {
+
+    const body: Record<string, unknown> = {
       model: request.model,
       prompt: request.prompt,
       duration: request.duration,
       resolution: request.resolution,
-      metadata,
-    });
+      ...(request.ratio ? { ratio: request.ratio } : {}),
+      ...(typeof request.generateAudio === "boolean" ? { generate_audio: request.generateAudio } : {}),
+      ...(firstFrame ? { first_frame_url: firstFrame } : {}),
+      ...(lastFrame ? { last_frame_url: lastFrame } : {}),
+      ...(references.length ? { references } : {}),
+      ...(request.other ?? {}),
+    };
+    const url = await generateTask(this, "video", "video/generations", body, signal);
+    return [{ mediaType: "video", type: "url", url, mimeType: "video/mp4" }];
   },
 } satisfies ProviderDefinition<typeof rules>;

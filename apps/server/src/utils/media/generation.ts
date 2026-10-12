@@ -35,7 +35,16 @@ export async function listMediaModels(): Promise<MediaModel[]> {
     const builtIn = (mediaProviders as readonly Provider[]).find(item => item.id === provider.id)?.models.find(item => item.id === model.id);
     return [{
       providerId: provider.id, providerLabel: provider.label, modelId: model.id, label: model.label, type: model.type,
-      mode: model.mode, durationResolutionMap: model.durationResolutionMap, audio: model.audio,
+      mode: model.mode,
+      // ⚠️ 生成能力（时长/分辨率/比例）**必须回退到内置声明**，不能只看磁盘上那份文件：
+      //    安装版的 data/providers/*.ts 会被「自动更新模型」重写，而网关只给 id、不给能力，
+      //    重写后 durationResolutionMap / videoRatios 就整段丢了 —— 节点上的时长、分辨率、
+      //    比例三个下拉会全空，用户以为模型不能用。内置声明才是唯一的权威来源。
+      durationResolutionMap: model.durationResolutionMap ?? builtIn?.durationResolutionMap,
+      audio: model.audio,
+      ...(model.type === "video" ? {
+        videoRatios: imageOptions(Array.isArray(model.videoRatios) ? model.videoRatios : builtIn?.videoRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
+      } : {}),
       ...(model.type === "audio" ? { voices: model.voices } : {}),
       ...(model.type === "image" ? {
         imageSizes: imageOptions(Array.isArray(model.imageSizes) ? model.imageSizes : builtIn?.imageSizes, /^[^\u0000-\u001f\u007f]+$/),

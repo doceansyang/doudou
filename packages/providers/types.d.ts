@@ -21,6 +21,15 @@ interface ProviderModel {
   audio?: "optional" | boolean;
   imageSizes?: string[];
   imageRatios?: string[];
+  /**
+   * 视频模型支持的画面宽高比，如 `["16:9", "9:16"]`。
+   *
+   * 为什么必须由模型声明：比例是**按模型**变的 —— Seedance 2.0 有 21:9，
+   * Wan 3.0 有 adaptive，Grok 只有 1:1/16:9/9:16 一类的常规档；
+   * 节点里写死一份公共列表，用户就会选到模型其实不支持的比例。
+   * 缺省时由节点回退到一组保守默认值。
+   */
+  videoRatios?: string[];
   durationResolutionMap?: { duration: number[]; resolution: string[] }[];
   voices?: { title: string; voice: string }[];
 }
