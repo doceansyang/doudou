@@ -69,9 +69,37 @@ MAIN = '''
     static void Main(string[] args)
     {
         Application.EnableVisualStyles();
-        string reason = args.Length > 0 ? args[0] : "";
+        string first = args.Length > 0 ? args[0] : "";
         string outDir = args.Length > 1 ? args[1] : "scripts/_out";
         Directory.CreateDirectory(outDir);
+
+        // 传 "success" 时渲染「激活成功」小弹窗（186x150）而不是授权主窗。
+        // 这样一条命令就能预览两种窗体：--shot-license / --shot-license success
+        if (first == "success")
+        {
+            using (var f = new SuccessForm("现在将启动软件"))
+            {
+                f.StartPosition = FormStartPosition.Manual;
+                f.Location = new Point(0, 0);
+                f.Show();
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(500);
+                Application.DoEvents();
+                string sf = Path.Combine(outDir, "success-window.png");
+                using (var bmp = new Bitmap(f.Width, f.Height))
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    IntPtr hdc = g.GetHdc();
+                    try { PrintWindow(f.Handle, hdc, 2); }
+                    finally { g.ReleaseHdc(hdc); }
+                    bmp.Save(sf, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                Console.WriteLine("saved " + sf + "  " + f.Width + "x" + f.Height);
+            }
+            return;
+        }
+
+        string reason = first;
         using (var form = new LicenseForm("81DE1-D8EC-15AE3-FAEDA", reason))
         {
             form.StartPosition = FormStartPosition.Manual;
@@ -143,6 +171,7 @@ def main():
     # 自检：重复定义会在编译期报 CS0111，这里提前挡住
     checks = {
         "class LicenseForm": 1, "static class Rounded": 1,
+        "class SuccessForm": 1,
         "class FlatPanel": 1, "class GlassCard": 1,
         "class RoundedButton": 1, "class HoverCircle": 1,
         "class FieldShell": 1,

@@ -308,6 +308,33 @@ class JinyuTVLauncher
     [DllImport("user32.dll")] static extern bool ReleaseCapture();
     [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
 
+    /// <summary>
+    /// 把窗口/控件裁成圆角。WinForms 的 FlatStyle.Flat 只有方角，
+    /// 想要圆角必须自己给窗口区域（HRGN）——这是桌面端少见的原生做法。
+    /// 尺寸变化时要重新应用，否则会残留旧形状。
+    ///
+    /// ⚠️ 这里必须用 lambda 而不是局部函数 `void Apply() {}`：
+    ///    csc 编译 .NET 4.x 不支持局部函数语法（会报一堆 CS1519/CS1520）。
+    ///
+    /// 放在这一层（而不是某个 Form 内部）是因为**授权窗和成功提示窗都要用**。
+    /// </summary>
+    static void MakeRounded(Control control, int radius)
+    {
+        Action apply = delegate
+        {
+            try
+            {
+                if (!control.IsHandleCreated || control.Width <= 0 || control.Height <= 0) return;
+                var region = CreateRoundRectRgn(0, 0, control.Width + 1, control.Height + 1, radius * 2, radius * 2);
+                SetWindowRgn(control.Handle, region, true);   // 系统接管该区域的生命周期
+            }
+            catch { }
+        };
+        control.HandleCreated += delegate { apply(); };
+        control.Resize += delegate { apply(); };
+        apply();
+    }
+
 /// <summary>
     /// 圆角矩形几何：所有自绘控件共用。
     ///
@@ -319,6 +346,16 @@ class JinyuTVLauncher
     /// </summary>
     static class Rounded
     {
+        /// <summary>
+        /// 圆角矩形路径。
+        ///
+        /// ⚠️ 只用 4 次 AddArc + CloseFigure 即可，**不要**再补显式 AddLine：
+        ///    曾误判"描边时左右两条竖边画不出来"是这里缺连线，于是加了 4 条 AddLine。
+        ///    实测那样会让**别的**圆角描边（如密钥输入框左右边）反而变弱/消失 ——
+        ///    因为 AddArc 本身已带出同样的连线，重复段会干扰描边光栅化。
+        ///    真正的"左右缺边"根因在**调用方**：铺满整行的不透明 Label 把描边盖住了
+        ///    （见 SuccessForm 里 title/sub 的宽度内缩注释）。
+        /// </summary>
         public static System.Drawing.Drawing2D.GraphicsPath Rect(RectangleF r, int radius)
         {
             var path = new System.Drawing.Drawing2D.GraphicsPath();
@@ -571,7 +608,7 @@ class JinyuTVLauncher
             var rect = new RectangleF(0.5f, 0.5f + dy, Width - 1f, Height - 1f);
 
             int tint = _state == BtnState.Hover ? 14 : (_state == BtnState.Pressed ? -12 : 0);
-            if (!Enabled) tint = -18;
+            if (!Enabled) tint = -34;
 
             using (var path = Rounded.Rect(rect, Radius))
             {
@@ -592,7 +629,10 @@ class JinyuTVLauncher
             }
 
             // 文字自绘：不调 base.OnPaint，否则 Flat 按钮会盖掉圆角与渐变
-            Color fg = Enabled ? ForeColor : Color.FromArgb(0x6A, 0x6A, 0x72);
+            // ⚠️ 禁用态文字**不要用深灰**：深灰画在紫色渐变上会发闷，
+            //    看着像"按钮上糊了一块脏东西"（用户截图里"验证中…"就是这个观感）。
+            //    改用接近白色的浅灰，禁用感靠底色压暗来表达。
+            Color fg = Enabled ? ForeColor : Color.FromArgb(0xD2, 0xD2, 0xDA);
             TextRenderer.DrawText(g, Text, Font, new Rectangle(0, dy, Width, Height), fg,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
                 | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
@@ -953,6 +993,26 @@ class JinyuTVLauncher
                 using (var br = new SolidBrush(Color.FromArgb(0x26, 0x26, 0x27)))
                 using (var path = Rounded.Rect(new RectangleF(0, 0, w - 1, h - 1), 12))
                     g.FillPath(br, path);
+                return;
+            }
+
+            if (Kind == "check")
+            {
+                // 成功徽标：**实心圆 + 白色对勾**（"激活成功"弹窗用）。
+                // 用实心圆而不是描边圆，是因为它要在纯黑底上做视觉焦点，
+                // 描边圆在 34px 尺寸下太轻、压不住场。
+                float d = Math.Min(w, h);
+                var circle = new RectangleF((w - d) / 2f, (h - d) / 2f, d, d);
+                using (var fill = new SolidBrush(Stroke)) g.FillEllipse(fill, circle);
+                using (var pen2 = new Pen(Color.White, Math.Max(1.8f, d * 0.105f)))
+                {
+                    pen2.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                    pen2.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                    pen2.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
+                    float cx = w / 2f, cy = h / 2f;
+                    g.DrawLine(pen2, cx - d * 0.20f, cy + d * 0.01f, cx - d * 0.05f, cy + d * 0.16f);
+                    g.DrawLine(pen2, cx - d * 0.05f, cy + d * 0.16f, cx + d * 0.22f, cy - d * 0.15f);
+                }
                 return;
             }
 
@@ -1417,9 +1477,15 @@ public LicenseForm(string machine, string reason)
                 if (result.Contains("\"ok\":true"))
                 {
                     string note = JsonString(result, "note");
-                    MessageBox.Show(this,
-                        "激活成功！" + (note.Length > 0 ? ("\r\n\r\n授权信息：" + note) : "") + "\r\n\r\n现在将启动软件。",
-                        "JinyuTV", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    // 先把主窗状态行点亮（绿字）——弹出的小卡片只有 186px 宽，
+                    // 放不下授权备注；让它落在窗口里，两处一起看信息才完整。
+                    SetStatus(note.Length > 0 ? ("激活成功 · " + note) : "激活成功", false);
+                    // 弹窗期间按钮不该继续显示"验证中…"，改成成功态
+                    _activate.Enabled = true;
+                    _activate.Text = "已激活";
+                    _activate.Invalidate();
+                    using (var ok = new SuccessForm("现在将启动软件"))
+                        ok.ShowDialog(this);
                     DialogResult = DialogResult.OK;
                     Close();
                     return;
@@ -1468,29 +1534,138 @@ public LicenseForm(string machine, string reason)
         {
             return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
         }
+    }
 
-        /// <summary>
-        /// 把控件裁成圆角。WinForms 的 FlatStyle.Flat 只有方角，
-        /// 想要圆角必须自己给窗口区域（HRGN）——这是桌面端少见的原生做法。
-        /// 尺寸变化时要重新应用，否则会残留旧形状。
-        /// ⚠️ 这里必须用 lambda 而不是局部函数 `void Apply() {}`：
-        ///    csc 编译 .NET 4.x 不支持局部函数语法（会报一堆 CS1519/CS1520）。
-        /// </summary>
-        static void MakeRounded(Control control, int radius)
+    /// <summary>
+    /// 激活成功提示窗 —— 替换原来那个 Windows 原生 MessageBox。
+    ///
+    /// 为什么必须换：原生 MessageBox 是**系统白底 + 蓝色 ⓘ 图标 + 系统灰 OK 按钮**，
+    /// 夹在一套纯黑 + 紫色品牌的软件里极其突兀（用户原话"太丑了"）。
+    ///
+    /// 体量刻意与原 MessageBox 保持一致（约 186x150）—— 用户要求"大小不变"；
+    /// 视觉语言与 LicenseForm 完全同源：纯黑底、同款圆角与色板，主按钮复用品牌渐变。
+    /// </summary>
+    class SuccessForm : Form
+    {
+        public SuccessForm(string subtitle)
         {
-            Action apply = delegate
+            Color bgPage = Color.FromArgb(0x00, 0x00, 0x00);   // 同 LicenseForm：纯黑
+            // ⚠️ 卡片面**不能也用纯黑**：这个弹窗是压在同为纯黑的主窗上，
+            //    全黑卡片会跟背景糊成一片、完全没有边界。改用软件内卡片的同款面色，
+            //    再加 1px 描边，才有"浮起来的一张卡"的感觉。
+            Color surface = Color.FromArgb(0x14, 0x14, 0x14);  // 与软件内卡片同色
+            Color cardEdge = Color.FromArgb(0x3C, 0x3C, 0x40); // 略亮于 borderSub，抵消 AA 衰减
+            Color textPri = Color.FromArgb(0xE8, 0xE8, 0xEC);
+            Color textSec = Color.FromArgb(0x9A, 0x9A, 0xA2);
+            Color ok = Color.FromArgb(0x5C, 0xC9, 0x8A);       // 成功绿
+            Color brandA = Color.FromArgb(0x7C, 0x5C, 0xF0);   // 品牌紫
+            Color brandB = Color.FromArgb(0xE0, 0x6C, 0xC8);   // 品牌品红
+
+            const int W = 186, H = 150;
+
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.CenterParent;
+            ShowInTaskbar = false;
+            ClientSize = new Size(W, H);
+            BackColor = surface;
+            KeyPreview = true;
+            DoubleBuffered = true;
+
+            var card = new FlatPanel
             {
-                try
-                {
-                    if (!control.IsHandleCreated || control.Width <= 0 || control.Height <= 0) return;
-                    var region = CreateRoundRectRgn(0, 0, control.Width + 1, control.Height + 1, radius * 2, radius * 2);
-                    SetWindowRgn(control.Handle, region, true);   // 系统接管该区域的生命周期
-                }
-                catch { }
+                Bounds = new Rectangle(0, 0, W, H),
+                Fill = surface,
+                BackColor = surface,
             };
-            control.HandleCreated += delegate { apply(); };
-            control.Resize += delegate { apply(); };
-            apply();
+            card.MouseDown += delegate { DragWindow(); };
+            // 描边自己画，不用 GlassCard 自带的：
+            // GlassCard 把 1px 路径落在 (0,0,W-1,H-1)，画笔中心压在控件边缘上，
+            // 一半被裁掉 → 实测只剩 (24,24,24) 的淡影，根本看不出有边。
+            // 按 (0.5,0.5) 偏移画，1px 正好完整落在第 0 行/列上，边界清晰。
+            card.Paint += delegate(object s, PaintEventArgs pe)
+            {
+                pe.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                using (var path = Rounded.Rect(new RectangleF(0.5f, 0.5f, W - 1f, H - 1f), 14))
+                using (var pen = new Pen(cardEdge, 1f))
+                    pe.Graphics.DrawPath(pen, path);
+            };
+
+            // 实心绿圆 + 白勾：整张卡上唯一的色彩焦点
+            var badge = new IconBox
+            {
+                Kind = "check",
+                Stroke = ok,
+                StrokeWidth = 2f,
+                BgColor = surface,
+                Bounds = new Rectangle((W - 34) / 2, 20, 34, 34),
+            };
+
+            // ⚠️ 两个 Label 的宽度**必须内缩**，不能铺满 0..W：
+            //    Label 是不透明控件（BackColor=卡片面色），铺满时会把卡片左右两条
+            //    描边整段盖掉，看起来就是"边框只有上下两条、左右缺边"。
+            //    文字是居中的，内缩不影响观感。
+            var title = new Label
+            {
+                Text = "激活成功",
+                ForeColor = textPri,
+                BackColor = surface,
+                Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Bounds = new Rectangle(8, 58, W - 16, 22),
+            };
+
+            var sub = new Label
+            {
+                Text = subtitle,
+                ForeColor = textSec,
+                BackColor = surface,
+                Font = new Font("Microsoft YaHei UI", 9F),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Bounds = new Rectangle(8, 82, W - 16, 18),
+            };
+
+            var okBtn = new RoundedButton
+            {
+                Radius = 9,
+                Text = "好的",
+                Bounds = new Rectangle((W - 96) / 2, 108, 96, 30),
+                GradientFrom = brandA,
+                GradientTo = brandB,
+                BgColor = surface,           // 铺底＝卡片面色，杜绝圆角外的灰边
+                ForeColor = Color.White,
+                Font = new Font("Microsoft YaHei UI", 9.5F),
+                TabStop = false,
+                Cursor = Cursors.Hand,
+                DialogResult = DialogResult.OK,
+            };
+            okBtn.Click += delegate { Close(); };
+
+            card.Controls.AddRange(new Control[] { badge, title, sub, okBtn });
+            Controls.Add(card);
+            AcceptButton = okBtn;
+            CancelButton = okBtn;
+
+            MakeRounded(this, 14);
+            Shown += delegate { okBtn.Focus(); };
+        }
+
+        /// <summary>让系统给无边框窗体加一层投影，进一步和背景拉开层次。</summary>
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                const int CS_DROPSHADOW = 0x00020000;
+                var cp = base.CreateParams;
+                cp.ClassStyle |= CS_DROPSHADOW;
+                return cp;
+            }
+        }
+
+        /// <summary>无边框窗体拖动（与 LicenseForm 同一套做法）。</summary>
+        void DragWindow()
+        {
+            ReleaseCapture();
+            SendMessage(Handle, WM_NCLBUTTONDOWN, new IntPtr(2), IntPtr.Zero);
         }
     }
 
