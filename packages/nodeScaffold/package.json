@@ -23,7 +23,8 @@
     "./imageGridSplit": "./src/components/imageGridSplit.vue",
     "./imageEditor": "./src/components/imageEditor.vue",
     "./imageInpaintPrompt": "./src/components/imageInpaintPrompt.vue",
-    "./referenceItem": "./src/components/referenceItem.vue"
+    "./referenceItem": "./src/components/referenceItem.vue",
+    "./generationOverlay": "./src/components/generationOverlay.vue"
   },
   "scripts": {
     "typecheck": "vue-tsc --noEmit"

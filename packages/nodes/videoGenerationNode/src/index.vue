@@ -29,7 +29,9 @@
         </template>
       </el-dropdown>
     </template>
-    <div v-loading="generating || uploading" class="videoContent nopan" :aria-busy="generating || uploading">
+    <!-- uploading 仍是短任务，用转圈就够；generating 要跑 1～3 分钟，
+         换成带百分比爬升和动态背景的 genOverlay（见该组件顶部说明）。 -->
+    <div v-loading="uploading" class="videoContent nopan" :aria-busy="generating || uploading">
       <videoPlayer
         v-if="previewUrl"
         ref="player"
@@ -39,6 +41,7 @@
       <div v-else class="videoEmpty" role="img" aria-label="暂无生成视频">
         <icon-camera-ai :size="48" stroke="1.25" aria-hidden="true" />
       </div>
+      <generationOverlay :active="generating" />
     </div>
     <template #bottom>
       <el-card class="promptCard" shadow="never" :bodyStyle="{ padding: '14px 16px 12px' }">
@@ -105,6 +108,7 @@ import videoPlayer from "@toonflow/nodes-scaffold/videoPlayer";
 import videoActions from "@toonflow/node-video/videoActions";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
+import generationOverlay from "@toonflow/nodes-scaffold/generationOverlay";
 import generationSettings from "./components/generationSettings.vue";
 
 defineOptions({
