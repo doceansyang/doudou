@@ -128,11 +128,13 @@ async function resizeVideo(event: Event) {
   const video = event.currentTarget as HTMLVideoElement;
   if (!video.videoWidth || !video.videoHeight) return;
   // 240 必须与 videoPlayer 的 .videoPreview max-height 一致；
-  // 下限 180 必须与 .videoPlayer 的 min-width 一致 —— 两者相等时，
-  // 框宽与视频宽才严格吻合（视频铺满 min-width 那个盒子）。
-  // 之前把下限改成 96 会让竖屏节点的框比视频宽，出现两侧空隙。
+  // 下限必须与 .videoPlayer 的 min-width 一致 —— 两者相等时，
+  // 框宽与视频宽才严格吻合（视频铺满那个盒子）。
+  // ⚠️ 原来下限是 180：9:16 竖屏按高度换算只有 240×9/16 = 135px，被抬到 180，
+  //    于是两侧各多出 22.5px、露出播放器底色（"9:16 视频两边有灰边"）。
+  //    这处分寸是 JS 与 CSS 共管的，**必须一起改**：只改一边会被另一边顶回去。
   // +18 是 el-card 自身内边距与边框合计（8px×2 + 1px×2）。
-  videoWidth.value = Math.max(180, (240 * video.videoWidth) / video.videoHeight);
+  videoWidth.value = Math.max(96, (240 * video.videoWidth) / video.videoHeight);
   await nextTick();
   updateNodeInternals();
 }

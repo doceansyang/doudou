@@ -243,7 +243,11 @@ async function captureFrame(command: "current" | "first" | "last") {
 .videoPlayer {
   position: relative;
   width: 100%;
-  min-width: 180px;
+  // ⚠️ 这个下限**必须与 videoGenerationNode 的 resizeVideo 保持一致**：
+  //    那边算出的宽度是 `max(下限, 240 * 视频宽高比)`，两者不等就会出现
+  //    "框比视频宽" → 视频两侧露出播放器底色（就是用户说的"灰边"）。
+  //    9:16 竖屏按高度换算只有 135px，原来卡在 180 就凭空多出 45px 空隙。
+  min-width: 96px;
   container-type: inline-size;
   border-radius: var(--el-border-radius-base);
   background: var(--el-fill-color-darker);
@@ -339,6 +343,13 @@ async function captureFrame(command: "current" | "first" | "last") {
       padding: 8px 8px 4px;
       .currentTime, .durationLabel { font-size: 11px; }
       .durationLabel .timeSeparator { display: none; }
+    }
+    // 竖屏 9:16 的节点只有 ~135px 宽。五列硬塞会把时间码挤成一团，
+    // 这里砍掉时间与音量，只留「播放 / 进度 / 截帧」三个必需件。
+    @container (max-width: 210px) {
+      grid-template-columns: 28px minmax(0, 1fr) 28px;
+      grid-template-areas: "play progress capture";
+      .currentTime, .durationLabel, .volumeControl { display: none; }
     }
     @media (prefers-reduced-motion: reduce) { transition: none; }
   }
