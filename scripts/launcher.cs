@@ -2344,6 +2344,127 @@ class MainWindow : Form
         catch { }
     }
 
+    // ---------------------------------------------------------------- 防闪白（文档创建即上色）
+
+    /// <summary>
+    /// 在「文档刚创建、HTML 还没被解析」时，就把主题底色铺到 html 上。
+    ///
+    /// 为什么必须这么早：界面是 SPA，深浅色是 Vue 挂载后才算出来的（App.vue 的 watchEffect
+    /// 给 html 加 .dark）。而 index.html 里写死了 data-theme="light"，Element Plus 的
+    /// --el-bg-color 在没加 .dark 时是纯白 —— 于是**每一次整文档加载**都会先白一下、
+    /// 再被 JS 拨成深色。启动那一下、以及从外部网页点「← 返回 JinyuTV」（GoBackToApp 会
+    /// Navigate 回本地地址，等于整页重载）时最明显。
+    ///
+    /// 注意 DefaultBackgroundColor 挡不住这一下：它只负责「页面尚未开始绘制」的那段，
+    /// 一旦文档开始渲染，底色就由 CSS 说了算，也就是那个纯白。
+    ///
+    /// 脚本设计成「幂等 + 后写覆盖」：主题一变就再注入一份，文档创建时按注入顺序执行，
+    /// 最后注入的那份说了算 —— 所以永远与当前主题一致，也不会累积出错误结果。
+    /// </summary>
+    void InjectPrepaintTheme(bool dark)
+    {
+        try
+        {
+            var core = _web == null ? null : _web.CoreWebView2;
+            if (core == null) return;   // OnHandleCreated 阶段会被调用一次，此时还没有 WebView，静默跳过
+            core.AddScriptToExecuteOnDocumentCreatedAsync(BuildPrepaintScript(dark));
+            JinyuTVLauncher.Trace("已注入防闪白脚本：" + (dark ? "深色" : "浅色"));
+        }
+        catch (Exception ex)
+        {
+            JinyuTVLauncher.Trace("注入防闪白脚本失败：" + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// 生成预上色脚本。两个坑都踩过：
+    ///
+    /// ① **必须限定在软件自己的来源上**：这份脚本对 WebView 里的每一个新文档都会执行，
+    ///    若不加判断，用户点开的外部网页（例如凌客钱包页）也会被强行刷成深底，浅色站点直接糊掉。
+    /// ② **此刻 document.documentElement 还是 null**：文档创建早于 HTML 解析，
+    ///    html 元素要等解析器开始工作才有。第一版直接拿 documentElement 就 return 了，
+    ///    等于什么都没做（自检打出来是 false）。改成「拿到就上色，拿不到就守着」：
+    ///    MutationObserver 盯住 document，html 一挂上来立刻上色；再留一个定时兜底。
+    ///    这两条都会在首次绘制之前跑完，所以不会出现白帧。
+    /// </summary>
+    static string BuildPrepaintScript(bool dark)
+    {
+        string bg = dark ? "#17171a" : "#ffffff";
+        string js =
+            "(function(){" +
+            "var BG='" + bg + "',DARK=" + (dark ? "true" : "false") + ";" +
+            "function apply(){" +
+            "var d=document.documentElement;if(!d)return false;" +
+            "d.setAttribute('data-shell-theme',DARK?'dark':'light');" +
+            "d.style.colorScheme=DARK?'dark':'light';" +
+            // 深浅两态都写全：先前注入过深色、用户又切回浅色时，这一份要把 .dark 摘掉。
+            "if(DARK){d.classList.add('dark');}else{d.classList.remove('dark');}" +
+            "var s=document.getElementById('jinyu-prepaint');" +
+            "if(!s){s=document.createElement('style');s.id='jinyu-prepaint';(document.head||d).appendChild(s);}" +
+            "s.textContent='html{background-color:'+BG+' !important}';" +
+            "window.__jinyuPrepaint=true;" +   // 供启动器自检：证明这段确实在文档创建时跑过
+            "return true;}" +
+            "try{" +
+            "if(location.hostname==='localhost'&&location.port==='" + JinyuTVLauncher.PORT + "'){" +
+            "if(!apply()){" +
+            "var mo=new MutationObserver(function(){if(apply()){mo.disconnect();mo=null;}});" +
+            "mo.observe(document,{childList:true,subtree:true});" +
+            "document.addEventListener('readystatechange',function(){if(apply()&&mo){mo.disconnect();mo=null;}});" +
+            "setTimeout(function(){apply();if(mo){mo.disconnect();mo=null;}},0);" +
+            "}}" +
+            // ── api.linke.link：把「账户余额」的登录凭据回传给本地服务 ────────────────
+            //
+            // 为什么非得在页面里做：linke 控制台把访问令牌放在**内存里的 store**（不落
+            // localStorage），而刷新用的登录 cookie 是 httpOnly、JS 读不到 —— 只能**在页面里**
+            // 当面调它自己的 `/api/user/auth/refresh`（同源、cookie 自动带上），再把结果原样回传。
+            // 不碰用户的密码。
+            //
+            // 为什么回传 http://127.0.0.1 —— Chrome 把 localhost/127.0.0.1 视为可信来源，
+            // 所以 HTTPS 页面请求它**不算混合内容**，不会被拦。
+            // 字段解析**不在这一侧做**：服务端 /api/linke/session 一处收口，避免两头各写一份。
+            // 未登录时 refresh 会 401，什么都不会发出去。
+            "else if(location.hostname==='api.linke.link'){" +
+            "var tries=0,done=false;" +
+            "var cap=function(){if(done)return;" +
+            "fetch('/api/user/auth/refresh',{method:'POST',credentials:'include'})" +
+            ".then(function(r){return r.ok?r.json():null;})" +
+            ".then(function(j){if(!j)return null;" +
+            "return fetch('http://127.0.0.1:" + JinyuTVLauncher.PORT + "/api/linke/session',{method:'POST'," +
+            "headers:{'Content-Type':'application/json','x-toonflow-workspace':'1'}," +
+            "body:JSON.stringify({payload:j,cookie:document.cookie})});})" +
+            ".then(function(r){if(r&&r.ok){done=true;window.__jinyuLinkeCaptured=true;}})" +
+            ".catch(function(){});};" +
+            "cap();" +
+            // 登录发生在 SPA 里、可能在脚本跑完之后 ⇒ 隔 3 秒重试，最多 20 次（约 1 分钟）。
+            "var iv=setInterval(function(){if(done||++tries>20){clearInterval(iv);return;}cap();},3000);" +
+            "}" +
+            "}catch(e){}})();";
+        return js;
+    }
+
+    /// <summary>一次性自检：确认防闪白脚本真的在软件页面上执行了（结果写进启动日志）。</summary>
+    async void CheckPrepaintScript()
+    {
+        if (_prepaintChecked) return;
+        _prepaintChecked = true;
+        try
+        {
+            var core = _web == null ? null : _web.CoreWebView2;
+            if (core == null) return;
+            string raw = await core.ExecuteScriptAsync(
+                "JSON.stringify({ran:window.__jinyuPrepaint===true,style:!!document.getElementById('jinyu-prepaint')," +
+                "dark:document.documentElement.classList.contains('dark')," +
+                "bg:getComputedStyle(document.documentElement).backgroundColor})");
+            JinyuTVLauncher.Trace("防闪白脚本自检（ran 应为 true）：" + raw);
+        }
+        catch (Exception ex)
+        {
+            JinyuTVLauncher.Trace("防闪白脚本自检失败：" + ex.Message);
+        }
+    }
+
+    bool _prepaintChecked;
+
     protected override void OnKeyDown(KeyEventArgs e)
     {
         // 在外部网页里时，Alt+← 返回软件（浏览器用户的肌肉记忆）
@@ -2399,6 +2520,8 @@ class MainWindow : Form
     {
         if (_appliedDark.HasValue && _appliedDark.Value == dark) return;
         _appliedDark = dark;
+        // 主题变了 → 重新注入一份防闪白脚本：文档创建时后注入者生效，下次整页加载就是新主题
+        InjectPrepaintTheme(dark);
         try
         {
             if (!IsHandleCreated) return;
@@ -2507,6 +2630,9 @@ class MainWindow : Form
             core.Settings.IsZoomControlEnabled = true;
         }
         catch { }
+        // 防闪白：把当前主题交给浏览器，让每一次整文档加载（启动、从外部网页返回、刷新）
+        // 在 HTML 解析之前就已经是深底，不再先白一下再被 JS 拨回来。
+        InjectPrepaintTheme(_appDark);
         // 页面内 target=_blank 一律在本窗口打开，不弹出外部浏览器
         core.NewWindowRequested += delegate(object s2, CoreWebView2NewWindowRequestedEventArgs e2)
         {
@@ -2522,6 +2648,8 @@ class MainWindow : Form
         core.NavigationCompleted += delegate(object s2, CoreWebView2NavigationCompletedEventArgs e2)
         {
             try { UpdateNavBar(core.Source); } catch { }
+            // 软件页面首次加载完成后，确认防闪白脚本确实执行过（结果落在启动日志里）
+            try { if (e2.IsSuccess && IsAppUrl(core.Source)) CheckPrepaintScript(); } catch { }
             if (e2.IsSuccess) { _navRetry = 0; _navRetrySince = default(DateTime); _navRetryGaveUp = false; return; }
             // 载入失败：软件自身页面还没起来（服务正在重启/刚被拉起）→ 稍后自动重试。
             // 判据刻意保守：只对「软件自己的地址 / 空白页」重试，绝不干扰外部网页。

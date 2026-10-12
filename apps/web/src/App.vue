@@ -195,6 +195,10 @@ watchEffect(() => {
     );
   }
   root.style.setProperty("--el-color-primary-dark-2", `color-mix(in srgb, ${primaryColor} 80%, ${dark ? "#fff" : "#000"})`);
+  // 桌面外壳在文档创建时会注入一份「防闪白」底色（见 launcher.cs 的 InjectPrepaintTheme），
+  // 目的是让整页加载的瞬间就是正确底色、而不是先白一下。到这里真实主题变量已经算好了，
+  // 把它撤掉交回 Element Plus，避免它一直 !important 压着 --el-bg-color。
+  document.getElementById("jinyu-prepaint")?.remove();
 });
 </script>
 

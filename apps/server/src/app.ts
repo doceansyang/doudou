@@ -13,7 +13,10 @@ import { languageRequest, resolveRequestLocale, runWithLocale, setLocaleFallback
 import { detectLocale, normalizeLocale } from "@toonflow/i18n";
 import { z } from "zod";
 
-const autoInstallProviders = ["JinyuDream.ts", "apiMart.ts", "metaso.ts"];
+// 内置媒体供应商的**自动安装清单**：这份列表里的文件会被铺到 <数据目录>/providers。
+// APIMart / 秘塔版 MiniMax H3 已下线，不在清单里 —— 同时也要把它们从 data/providers 里删掉，
+// 因为 initializePlugins 只做「新增/覆盖」，**不会**清理已经铺进去的旧文件（标记位也拦不住）。
+const autoInstallProviders = ["JinyuDream.ts"];
 
 export async function createApp({
   webRoot,

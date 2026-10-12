@@ -40,7 +40,7 @@
             添加私有提供商
           </el-button>
           <span class="separator">或</span>
-          <el-button class="secondaryButton" round :loading="saving" @click="completeSetup">稍后配置</el-button>
+          <el-button class="secondaryButton laterButton" round :loading="saving" @click="completeSetup">稍后配置</el-button>
         </div>
       </div>
 
@@ -336,6 +336,28 @@ onBeforeUnmount(() => {
           padding: 8px 16px;
           white-space: normal;
           font-size: 13px;
+        }
+
+        /* 「稍后配置」高亮 —— **配色照抄激活弹窗那颗「激活」按钮**
+           （`scripts/launcher.cs` 的 LicenseForm：GradientFrom #7C5CF0 → GradientTo #E06CC8 + 白字）。
+           用户口径：**只换颜色，尺寸/圆角/字号/字重一律不动** —— 所以这里只写颜色属性，
+           其它全部继承 `.secondaryButton`。
+
+           ⚠️ 必须 `!important`：`assets/main.scss` 里有一条**深色主题专用**规则
+           `html.dark .el-button:not(.el-button--primary):not(…)…:hover`（特异性 0,8,1），
+           会把悬停时的文字改成品牌前景色、边框改成中性灰。本组件 scoped 选择器最高只到
+           0,8,0 —— 差一个类，压不过去；真压不过时，悬停会在紫渐变上冒出一圈灰边、
+           白字也会变灰。 */
+        .laterButton {
+          color: #fff !important;
+          border-color: transparent !important;
+          background-image: linear-gradient(135deg, #7c5cf0, #e06cc8);
+
+          /* 悬停/聚焦只把渐变提亮一档，保持同一配色语言。 */
+          &:hover,
+          &:focus-visible {
+            background-image: linear-gradient(135deg, #8a6bf5, #e97ed2);
+          }
         }
       }
     }

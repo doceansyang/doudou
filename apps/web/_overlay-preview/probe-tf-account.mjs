@@ -17,7 +17,7 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
 
-await page.goto("http://127.0.0.1:3000/", { waitUntil: "domcontentloaded" });
+await page.goto("http://127.0.0.1:3000/#/home", { waitUntil: "domcontentloaded" });
 const entry = page.locator(".projectEntry").first();
 await entry.waitFor({ state: "visible", timeout: 20000 });
 await entry.click();

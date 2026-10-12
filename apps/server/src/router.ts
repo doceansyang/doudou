@@ -108,6 +108,7 @@ import route105 from "./routes/workspaces/files/reveal";
 import route106 from "./routes/workspaces/files/write";
 import route107 from "./routes/workspaces/list";
 import route108 from "./routes/workspaces/selectDirectory";
+import route109 from "./routes/linke";
 
 export default (app: Express) => {
   app.use("/api/agent", route1);
@@ -218,4 +219,6 @@ export default (app: Express) => {
   app.use("/api/workspaces/files/write", route106);
   app.use("/api/workspaces/list", route107);
   app.use("/api/workspaces/selectDirectory", route108);
+  // 账户余额：linke 只认**网页登录的用户令牌**（sk key 读不到），凭据由启动器注入脚本回传。
+  app.use("/api/linke", route109);
 }

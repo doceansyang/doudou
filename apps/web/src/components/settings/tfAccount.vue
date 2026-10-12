@@ -3,26 +3,22 @@
     <div v-if="apiKey" class="accountHeader">
       <div class="accountBalance">
         <el-text size="small" type="info">账户余额</el-text>
-        <el-skeleton v-if="loading && !balance && !unsupported" animated>
+        <el-skeleton v-if="loading" animated>
           <template #template><el-skeleton-item class="balancePlaceholder" variant="text" /></template>
         </el-skeleton>
-        <strong v-else-if="balance" class="balanceNumber">{{ numberFormat.format(balance.balance) }}</strong>
-        <!-- 网关上没有余额接口时，别把 axios 的 "Request failed with status code 404"
-             原样抖给用户 —— 那看着像"我的 key 填错了"。这里给一句人话。 -->
-        <el-text v-else-if="unsupported" class="balanceHint" size="small" type="info">网关未提供此接口</el-text>
-        <strong v-else class="balanceNumber">—</strong>
+        <strong v-else-if="account?.ok" class="balanceNumber">{{ numberFormat.format(account.balance ?? 0) }}</strong>
+        <el-text v-else class="balanceHint" size="small" type="info">{{ hint }}</el-text>
       </div>
       <div class="accountActions">
-        <el-button text circle :icon="IconRefresh" :loading="loading" :disabled="!apiKey" aria-label="刷新余额" title="刷新余额" @click="refresh" />
-        <el-button v-if="!unsupported" size="small" :icon="IconCreditCard" :disabled="!apiKey" @click="openRecharge">充值</el-button>
+        <el-button text circle :icon="IconRefresh" :loading="loading" aria-label="刷新余额" title="刷新余额" @click="refresh" />
         <!--
-          直达网关的**真实余额页** /wallet（实测：它会 302 到
-          `https://api.linke.link/sign-in?redirect=%2Fwallet`，即"需登录的真实路由"；
-          而那个 SPA 对任意路径都返回同一份 200 HTML，所以光看状态码判别不了）。
-          `target="_blank"` 不是"弹新窗口"：启动器把 NewWindowRequested 接管成
-          **原地导航**，于是会在软件窗口里打开、并显示「外部网页」返回条
-          （Alt+← 或点「← 返回 JinyuTV」回到软件）。登录一次后 cookie 常驻。
+          **余额只能靠网页登录的用户令牌读到**（sk key 读不到，见 apps/server/src/routes/linke.ts 的实测表）。
+          `target="_blank"` 不是"弹新窗口"：启动器把 NewWindowRequested 接管成**原地导航**，
+          于是会在软件窗口里打开、并显示「外部网页」返回条。登录/打开钱包页时，启动器注入到
+          linke 页面的脚本会顺手把凭据回传给我们（不碰密码）；点「← 返回 JinyuTV」回来时
+          整页重载，余额就显示出来了。
         -->
+        <el-button v-if="!account?.ok" tag="a" href="https://api.linke.link/wallet" target="_blank" rel="noopener noreferrer" size="small" type="primary" :icon="IconLogin">登录并获取余额</el-button>
         <el-button v-else tag="a" href="https://api.linke.link/wallet" target="_blank" rel="noopener noreferrer" size="small" :icon="IconExternalLink">查看余额</el-button>
       </div>
     </div>
@@ -45,84 +41,64 @@
         前往 Linke 官网 获取 API Key
       </el-button>
     </div>
-    <div v-else-if="unsupported" class="accountNotice">
+    <div v-if="apiKey && account && !account.ok" class="accountNotice">
       <el-text size="small" type="info">
-        当前网关（api.linke.link）不提供「密钥余额」接口，所以这里读不到数字。点右侧「查看余额」会在软件内打开网关的余额页（首次需登录，之后免登录）。
+        linke 网关对 **API Key** 只开放「已用额度」，读不到余额；余额要用**网页登录的用户令牌**才能读（实测 `/api/user/self` 对 sk key 一律 401）。点「登录并获取余额」会在软件内打开网关的余额页 —— 登录一次即可，之后免登录。
       </el-text>
     </div>
-    <div v-else-if="errorMessage" class="accountError" role="alert">
-      <el-text size="small" type="danger">{{ errorMessage }}</el-text>
-      <el-button text size="small" :disabled="loading" @click="refresh">重试</el-button>
-    </div>
-    <div v-if="balance" class="accountDetails">
-      <div class="accountMetric">
-        <el-text size="small" type="info">密钥余额</el-text>
-        <span>{{ balance.keyBalance === null ? "无限制" : numberFormat.format(balance.keyBalance) }}</span>
-      </div>
+    <div v-if="account?.ok" class="accountDetails">
       <div class="accountMetric">
         <el-text size="small" type="info">累计消费</el-text>
-        <span>{{ numberFormat.format(balance.totalConsumption) }}</span>
+        <span>{{ numberFormat.format(account.used ?? 0) }}</span>
       </div>
-      <div class="accountMetric">
-        <el-text size="small" type="info">累计充值</el-text>
-        <span>{{ numberFormat.format(balance.totalRecharge) }}</span>
+      <div v-if="account.name" class="accountMetric">
+        <el-text size="small" type="info">账号</el-text>
+        <span>{{ account.name }}</span>
       </div>
     </div>
-    <component :is="rechargeDialog" v-model="rechargeVisible" :apiKey="apiKey" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { locale } from "@toonflow/i18n/vue";
-import { computed, defineAsyncComponent, onBeforeUnmount, ref, shallowRef, watch, type Component } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import axios from "axios";
-import { IconCreditCard, IconExternalLink, IconRefresh } from "@tabler/icons-vue";
-import tf, { type TfBalance } from "@/lib/tf";
+import { IconExternalLink, IconLogin, IconRefresh } from "@tabler/icons-vue";
+
+/**
+ * 余额来自**本国服务端** `/api/linke/balance`，不是直连网关。
+ *
+ * 为什么不直连：余额要用网页登录的用户令牌（sk key 读不到，实测 `/api/user/self` 一律 401），
+ * 而令牌是启动器注入到 linke 页面里的脚本**回传**给服务端保存的 —— 浏览器这侧根本拿不到它，
+ * 让它去直连只会多一份跨域与凭据的麻烦。判据与换算都在服务端一处（`routes/linke.ts`）。
+ */
+type LinkeAccount = { ok: boolean; reason?: "no-token" | "token-expired" | "failed"; balance?: number; used?: number; name?: string };
 
 const props = withDefaults(defineProps<{
   apiKey: string;
   visible?: boolean;
   saveApiKey: (key: string) => Promise<void>;
 }>(), { visible: true });
-const rechargeDialog = shallowRef<Component>();
-const rechargeVisible = ref(false);
 const apiKey = computed(() =>
   props.apiKey
     .trim()
     .replace(/^Bearer\s+/i, "")
     .trim()
 );
-const balance = ref<TfBalance>();
+const account = ref<LinkeAccount>();
 const loading = ref(false);
-const errorMessage = ref("");
-/**
- * 网关上根本没有余额接口（HTTP 404）。
- *
- * 背景：这套「余额 / 充值」接口（`/v1/balance`、`/v1/recharge/*`、`/web/*`）是
- * **原版 Toonflow 私有后端**的；当初做品牌替换时是把域名整串替换过去的
- * （见 `scripts/rebrand-api-to-linke.py`），而 api.linke.link 是个 **new-api 网关**，
- * 只有 OpenAI 兼容的 `/v1/*` 与它自己的 `/api/*`，没有这些路由 —— 实测：
- *   `GET /v1/models` -> 200（key 有效）
- *   `GET /v1/balance` -> 404 Invalid URL
- *   `/v1/dashboard/billing/*` -> 200 但值是**写死的占位**（hard_limit 1e8）
- *   `/api/user/*` -> 401（要网页登录态，不认 sk key）
- * 所以这里不再把 axios 的 404 原文抛给用户（看着像"key 填错了"），
- * 改成明说"网关没这个接口"+ 给控制台入口；一旦换回支持该接口的网关，原逻辑自动恢复。
- */
-const unsupported = ref(false);
 const draftKey = ref("");
 const saving = ref(false);
 const setupError = ref("");
 const numberFormat = computed(() => new Intl.NumberFormat(locale.value, { style: "currency", currency: "CNY", minimumFractionDigits: 2, maximumFractionDigits: 6 }));
+const hint = computed(() => {
+  const reason = account.value?.reason;
+  if (reason === "no-token") return "未登录（余额需网页登录令牌）";
+  if (reason === "token-expired") return "登录已过期，请重新登录";
+  if (reason === "failed") return "读取失败，可点左侧刷新重试";
+  return "未获取到余额";
+});
 let controller: AbortController | undefined;
-let rechargeKey = "";
-
-function openRecharge() {
-  if (!apiKey.value || !props.visible) return;
-  rechargeKey = apiKey.value;
-  rechargeDialog.value ??= defineAsyncComponent(() => import("./tfRechargeDialog.vue"));
-  rechargeVisible.value = true;
-}
 
 async function submitKey() {
   const key = draftKey.value.trim();
@@ -141,30 +117,22 @@ async function submitKey() {
 
 async function refresh() {
   controller?.abort();
-  loading.value = false;
-  errorMessage.value = "";
-  unsupported.value = false;
   if (!apiKey.value || !props.visible) return;
   const request = new AbortController();
   controller = request;
   loading.value = true;
   try {
-    const result = await tf.getBalance({ apiKey: apiKey.value, signal: request.signal });
-    if (!request.signal.aborted) balance.value = result;
-  } catch (error) {
-    if (!request.signal.aborted) {
-      // 404 = 这个网关上没有该路由，不是"你的 key 有问题"，所以走专门的提示分支
-      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
-      if (status === 404) {
-        unsupported.value = true;
-      } else {
-        errorMessage.value = axios.isAxiosError<{ message?: string }>(error)
-          ? error.response?.data?.message || error.message
-          : error instanceof Error
-          ? error.message
-          : "余额查询失败，请重试";
-      }
-    }
+    const { data } = await axios.get<{ code: number; data: LinkeAccount }>("/api/linke/balance", {
+      signal: request.signal,
+      headers: { "x-toonflow-workspace": "1" },
+      timeout: 30000,
+    });
+    if (request.signal.aborted) return;
+    const payload = data?.data;
+    account.value = payload && typeof payload === "object" ? payload : { ok: false, reason: "failed" };
+  } catch {
+    // 服务端读不到余额时**不会**抛错（它回 `{ok:false, reason}`），能走到这里只可能是网络/服务本身的问题。
+    if (!request.signal.aborted) account.value = { ok: false, reason: "failed" };
   } finally {
     if (!request.signal.aborted) loading.value = false;
   }
@@ -173,17 +141,13 @@ async function refresh() {
 watch(
   [apiKey, () => props.visible],
   () => {
-    rechargeVisible.value = false;
-    balance.value = undefined;
+    account.value = undefined;
     draftKey.value = "";
     setupError.value = "";
     void refresh();
   },
   { immediate: true }
 );
-watch(rechargeVisible, (isOpen, wasOpen) => {
-  if (wasOpen && !isOpen && rechargeKey === apiKey.value && props.visible) void refresh();
-});
 onBeforeUnmount(() => controller?.abort());
 </script>
 
