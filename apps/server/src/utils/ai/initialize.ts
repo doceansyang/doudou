@@ -2,6 +2,7 @@ import JinyuDream from "@toonflow/providers/language/JinyuDream";
 import JinyuDreamMedia from "@toonflow/providers/media/JinyuDream";
 import conf from "@/utils/conf";
 import { fetchProviderModels } from "@/utils/ai/models";
+import { filterLanguageModels } from "@/utils/ai/languageModels";
 import { getMediaProviderApiKey, refreshMediaProviderModels } from "@/utils/media/provider";
 
 let initialization: Promise<void> | undefined;
@@ -22,14 +23,11 @@ async function refreshLanguageModels(previousSettings?: Record<string, unknown>)
   const apiKey = normalizeApiKey(provider?.apiKey);
   if (!apiKey || (previousSettings && apiKey === normalizeApiKey(getLanguageProvider(previousSettings)?.apiKey))) return;
   const fetched = await fetchProviderModels({ apiUrl: provider.apiUrl, protocol: provider.protocol, apiKey });
-  // ⚠️ 文本清单必须**剔掉媒体模型**。网关 `/v1/models` 是**全量**返回 ——
-  //    文本、图片、视频混在同一个数组里，而且不给类型字段（只有 gpt-image-2 带了
-  //    一个 image-generation 标记，其余全是 ["openai"]）。照单全收的后果：
-  //    `seedance-2`、`grok-video-1.5`、`wan3.0-video` 这些视频模型会出现在
-  //    「设置 → 文本模型」和**文本节点**的下拉里。
-  //    判据用媒体供应商的**权威清单**按 id 精确匹配，不去猜模型名。
-  const mediaIds = new Set(JinyuDreamMedia.models.map(model => model.id));
-  const models = fetched.filter(model => !mediaIds.has(model.id));
+  // ⚠️ 文本清单必须**剔掉媒体模型**（`seedance-2`、`wan3.0-video`、`gpt-image-2` 这些
+  //    会和文本模型混在同一个 `/v1/models` 结果里）。判据收口在 `filterLanguageModels`
+  //    一处 —— 「手动点获取模型」那条路（routes/providers/models.ts）用的是**同一个函数**，
+  //    别再在这里就地写一份（写两份必然漂移，正是本项目反复踩的坑）。
+  const models = await filterLanguageModels(fetched);
   if (!models.length) throw new Error("未获取到文本模型，保留原有列表");
   const current = conf.get("settings.customProviders");
   if (!Array.isArray(current)) return;

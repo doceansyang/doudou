@@ -14,7 +14,7 @@ page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
 page.on("console", (m) => { if (m.type() === "error" && !/favicon/i.test(m.text())) errors.push("console: " + m.text()); });
 
 for (let attempt = 1; ; attempt++) {
-  try { await page.goto("http://127.0.0.1:3000/", { waitUntil: "load", timeout: 30000 }); break; }
+  try { await page.goto("http://127.0.0.1:3000/#/home", { waitUntil: "load", timeout: 30000 }); break; }
   catch (e) { if (attempt >= 6) throw e; await page.waitForTimeout(3000); }
 }
 const entry = page.locator(".projectEntry").first();

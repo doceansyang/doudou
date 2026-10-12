@@ -17,7 +17,7 @@ page.on("console", (m) => { if (m.type() === "error" && !/favicon/i.test(m.text(
 // 服务有可能刚好在重启窗口里（本机启动器会被工具宿主回收）—— 重试几次，别一上来就判定失败。
 for (let attempt = 1; ; attempt++) {
   try {
-    await page.goto("http://127.0.0.1:3000/", { waitUntil: "load", timeout: 30000 });
+    await page.goto("http://127.0.0.1:3000/#/home", { waitUntil: "load", timeout: 30000 });
     break;
   } catch (error) {
     if (attempt >= 6) throw error;

@@ -31,11 +31,6 @@
         </div>
       </el-card>
     </div>
-    <div class="providerActions">
-      <el-button class="addButton" :icon="IconPlus" @click="openAdd('builtin')">添加供应商</el-button>
-      <el-button class="addButton" :icon="IconSettings" @click="openAdd('custom')">添加自定义供应商</el-button>
-    </div>
-    <component :is="mediaProviderDialog" v-model="providerDialogVisible" :mode="addMode" @added="saveProviderItem" />
     <component :is="editProviderDialog" v-model="editorVisible" :provider="editingProvider" @saved="saveProviderItem" />
   </div>
 </template>
@@ -44,7 +39,7 @@
 import axios from "axios";
 import { computed, defineAsyncComponent, onMounted, onBeforeUnmount, ref, shallowRef, type Component } from "vue";
 import { ElMessage } from "element-plus";
-import { IconPlus, IconSettings, IconEdit, IconTrash, IconDownload } from "@tabler/icons-vue";
+import { IconEdit, IconTrash, IconDownload } from "@tabler/icons-vue";
 import logoUrl from "@toonflow/assets/logo.svg";
 import type { MediaProvider } from "./types";
 import { settings, saveSettings } from "@/stores/settings";
@@ -52,14 +47,19 @@ import { invalidateNodeModels } from "@toonflow/nodes-scaffold/nodeAi";
 import tfAccount from "../../tfAccount.vue";
 
 const { visible = true } = defineProps<{ visible?: boolean }>();
-const mediaProviderDialog = shallowRef<Component>();
+// ⚠️ 「添加供应商」「添加自定义供应商」两个入口已按要求**整体移除**（本软件只接官方
+//   中转平台 Linke，不让用户自己加别的中转站）。因此 `addCustomProviderDialog`
+//   （媒体侧那个弹窗组件）在这里不再被引用，`openAdd` / `addMode` / `providerDialogVisible`
+//   也一并删掉 —— 留着一个再也点不到的弹窗只会让下一个人以为还有入口。
+//   「编辑模型」那条路不受影响，走的是下面的 `editProviderDialog`。
+//   ⚠️ 若哪天真要放回自定义入口：`./addCustomProviderDialog.vue` 与 `.providerActions`
+//      这段样式都还在（后者在 providerList.scss 里），恢复时别忘了它有两个 mode
+//      （builtin / custom）。
 const editProviderDialog = shallowRef<Component>();
 const providers = ref<MediaProvider[]>([]);
 const sortedProviders = computed(() => [...providers.value].sort((a, b) => Number(b.id.toLowerCase() === "jinyudream") - Number(a.id.toLowerCase() === "jinyudream")));
 const loaded = ref(false);
-const providerDialogVisible = ref(false);
 const editorVisible = ref(false);
-const addMode = ref<"builtin" | "custom">("builtin");
 const editingProvider = ref<MediaProvider>();
 const deletingFile = ref("");
 const fetchingFile = ref("");
@@ -103,12 +103,6 @@ async function loadProviders() {
   } finally {
     if (request === loadRequest) loaded.value = true;
   }
-}
-
-function openAdd(mode: "builtin" | "custom") {
-  mediaProviderDialog.value ??= defineAsyncComponent(() => import("./addCustomProviderDialog.vue"));
-  addMode.value = mode;
-  providerDialogVisible.value = true;
 }
 
 function editProvider(provider: MediaProvider) {

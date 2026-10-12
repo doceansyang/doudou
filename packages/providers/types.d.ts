@@ -22,6 +22,15 @@ interface ProviderModel {
   imageSizes?: string[];
   imageRatios?: string[];
   /**
+   * 图片模型「各分辨率档位各支持哪些宽高比」。
+   *
+   * 为什么要按档位分：同一模型的高档位常常**收窄比例集合** —— gpt-image-2 的 1K / 2K
+   * 支持全部 13 种比例，4K 只支持 8 种（不含 1:1 / 3:2 / 2:3 / 4:3 / 3:4 / 5:4 / 4:5）。
+   * 只给一份扁平 `imageRatios`，用户就会在 4K 下选到上游会拒的比例。
+   * 节点按当前档位过滤比例按钮；缺省时回退 `imageRatios`。
+   */
+  imageRatioMap?: Record<string, string[]>;
+  /**
    * 视频模型支持的画面宽高比，如 `["16:9", "9:16"]`。
    *
    * 为什么必须由模型声明：比例是**按模型**变的 —— Seedance 2.0 有 21:9，

@@ -242,7 +242,7 @@ function confirmModel() {
     if (value.type === "video" && changed("videoRatios")) {
       const ratios = draft.value.videoRatios.map(item => item.trim()).filter(Boolean);
       for (const ratio of ratios) {
-        if (!/^[1-9]\d{0,3}:[1-9]\d{0,3}$/.test(ratio)) throw new Error(`比例格式应为「宽:高」，如 16:9；收到：${ratio}`);
+        if (!/^(?:[1-9]\d{0,3}:[1-9]\d{0,3}|adaptive)$/.test(ratio)) throw new Error(`比例格式应为「宽:高」（如 16:9）或 adaptive（由上游自动选比例）；收到：${ratio}`);
       }
       // 比例可以为空 —— 节点会回退到一组保守默认值，所以这里不强制必填。
       if (ratios.length) value.videoRatios = [...new Set(ratios)];

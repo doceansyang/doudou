@@ -14,7 +14,9 @@ export default {
   version: "2.0.1",
   apiUrl: "https://api.linke.link/v1",
   protocol: "openai-completions",
-  readme: "## JinyuTV 官方中转平台\n\n提供文本模型服务。\n\n[前往中转平台](https://api.linke.link/)",
+  // 文案与「媒体模型」那份保持同一格式（正文 + 「🔗 通过此 [注册链接](…) 注册即可开用。」）。
+  // 链接色由 messageMarkdown 的 --primary（= --ui-brand-foreground）决定，随主题走，别写死颜色。
+  readme: "## JinyuTV 官方中转平台\n\n提供文本模型服务。\n\n🔗 通过此 [注册链接](https://api.linke.link/register) 注册即可开用。",
   rules,
   /*
    * 这里是**大语言模型**清单（对应「设置 → 文本模型」与文本节点）。

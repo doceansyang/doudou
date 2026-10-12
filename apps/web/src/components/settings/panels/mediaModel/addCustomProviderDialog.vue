@@ -99,8 +99,6 @@ import logoUrl from "@toonflow/assets/logo.svg";
 import messageMarkdown from "@/components/messageMarkdown.vue";
 import { invalidateNodeModels } from "@toonflow/nodes-scaffold/nodeAi";
 import JinyuDreamSource from "@toonflow/providers/media/JinyuDream?raw";
-import apiMartSource from "@toonflow/providers/media/apiMart?raw";
-import metasoSource from "@toonflow/providers/media/metaso?raw";
 import type { MediaProvider } from "./types";
 import { providerPrompt } from "./providerPrompt";
 import { saveSettings } from "@/stores/settings";
@@ -109,7 +107,8 @@ import { writeClipboardText } from "@/lib/clipboard";
 const { mode = "custom" } = defineProps<{ mode?: "builtin" | "custom" }>();
 const visible = defineModel<boolean>({ default: false });
 const emit = defineEmits<{ added: [provider: MediaProvider] }>();
-const providerSources: Record<string, string> = { JinyuDream: JinyuDreamSource, apiMart: apiMartSource, metaso: metasoSource };
+// 「添加供应商」用的内置源码表（按 id 取 raw 源码）—— 只保留未下线的厂家。
+const providerSources: Record<string, string> = { JinyuDream: JinyuDreamSource };
 const selectedProvider = ref<string>(mediaProviders[0]?.id ?? "");
 const activeProvider = computed(() => mediaProviders.find(provider => provider.id === selectedProvider.value));
 const models = computed<MediaProvider["models"]>(() => activeProvider.value?.models ?? []);

@@ -1,7 +1,7 @@
 <template>
   <el-dialog
     v-model="visible"
-    :title="provider ? '编辑供应商' : '添加自定义供应商'"
+    :title="provider ? `编辑供应商：${provider.label}` : '添加自定义供应商'"
     width="min(760px, 94vw)"
     alignCenter
     appendToBody
@@ -11,8 +11,11 @@
     :showClose="!saving"
     @closed="resetForm">
     <el-scrollbar maxHeight="65vh">
+      <!-- 官方 Linke：只给一个填 Key 的地方，形态与「设置 → 媒体模型」的供应商编辑器一致。
+           说明文案取自内置供应商定义（按 id 匹配），这样两边文案只有一处来源。 -->
+      <messageMarkdown v-if="readme" class="providerReadme" :content="readme" />
       <el-form ref="providerForm" :model="form" :rules="rules" labelPosition="top" :disabled="saving" class="customProviderForm">
-        <div class="formGrid">
+        <div v-if="!locked" class="formGrid">
           <el-form-item label="Provider ID" prop="id"><el-input v-model="form.id" placeholder="例如 myProvider" /></el-form-item>
           <el-form-item label="显示名称" prop="label"><el-input v-model="form.label" placeholder="供应商的显示名称" /></el-form-item>
           <el-form-item label="API 地址" prop="apiUrl"><el-input v-model="form.apiUrl" dir="ltr" placeholder="https://api.example.com/v1" /></el-form-item>
@@ -122,11 +125,31 @@ import {
 import { saveSettings, type CustomProvider, type CustomProviderModel } from "@/stores/settings";
 import { languageProviders } from "@toonflow/providers";
 import { isJinyuDreamProvider } from "@/lib/tf";
+import messageMarkdown from "@/components/messageMarkdown.vue";
 
 const props = defineProps<{ provider?: CustomProvider }>();
 const visible = defineModel<boolean>({ default: false });
 const providerForm = ref<FormInstance>();
 const form = reactive({ id: "", label: "", apiUrl: "", protocol: "openai-completions", apiKey: "" });
+
+/*
+ * 「锁定」= 官方 Linke 供应商（id 为 JinyuDream 且地址就是 api.linke.link，见 lib/tf.ts）。
+ *
+ * 这类供应商**不给改** Provider ID / 显示名称 / API 地址 / API 协议 —— 用户能填的只有
+ * API Key，形态与「设置 → 媒体模型」的供应商编辑器一致。目的：把接入点钉死在自己的
+ * 中转平台上，用户没法把它改成别家中转站。
+ * 被藏起来的四个字段仍由 watch 从 props.provider 带进来并原样提交，所以不会丢配置。
+ * ⚠️ 隐藏靠 v-if：Element Plus 的 el-form-item 卸载后会**注销校验**，所以那几条
+ *    required/url 规则不会因为字段看不见而把保存卡住。
+ */
+const locked = computed(() => !!props.provider && isJinyuDreamProvider(props.provider));
+const readme = computed(() => {
+  const provider = props.provider;
+  if (!provider || !locked.value) return "";
+  // 文案取自内置供应商定义，与「媒体模型」那边同样只有一处来源
+  return languageProviders.find(item => item.id.toLowerCase() === provider.id.toLowerCase())?.readme ?? "";
+});
+
 const models = ref<(CustomProviderModel & { key: string })[]>([]);
 const expandedModels = ref(new Set<string>());
 const fetchedModels = shallowRef<CustomProviderModel[]>([]);
@@ -321,6 +344,11 @@ async function addProvider() {
 </script>
 
 <style lang="scss" scoped>
+/* 与「媒体模型」的供应商编辑器保持一样的说明排版 */
+.providerReadme {
+  margin-bottom: 20px;
+}
+
 .customProviderForm {
   padding-right: 12px;
 

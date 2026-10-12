@@ -53,6 +53,16 @@
         <el-form-item label="API Key">
           <el-input v-model="apiKey" :prefixIcon="IconKey" type="password" dir="ltr" showPassword autocomplete="off" aria-label="媒体供应商 API Key" />
         </el-form-item>
+        <!-- 素材上传通道：只对 Linke 显示。本网关的模型多数只收**公网 URL** 的参考素材
+             （Wan 3.0 / Grok / GPT Image 系列，以及所有模型的参考视频），而网关既不做
+             base64→URL 转换、也没转发 toapis 的素材上传接口 —— 所以软件自己调用 toapis
+             的上传接口，把本地素材换成公网地址再交给 linke 生成。上传免费。 -->
+        <el-form-item v-if="isJinyuDream" label="素材上传密钥（toapis，选填）">
+          <el-input v-model="uploadApiKey" :prefixIcon="IconKey" type="password" dir="ltr" showPassword autocomplete="off" aria-label="素材上传密钥" placeholder="填了它，本地参考图 / 视频 / 音频会先上传换取公网地址" />
+          <el-text class="uploadHint" type="info" size="small">
+            留空也能用，只是 Wan 3.0 / Grok / GPT Image 系列（以及所有参考视频）无法引用本地素材。Seedance 系列的参考图与参考音频本来就支持本地文件，不需要它。本密钥来自 toapis，与上面的 API Key 不是同一把。
+          </el-text>
+        </el-form-item>
       </el-form>
 
       <div class="modelHeader">
@@ -117,12 +127,19 @@ const modelEditorVisible = ref(false);
 const editingModelIndex = ref<number>();
 const saving = ref(false);
 const apiKey = ref("");
+// 素材上传通道的密钥（目前只有 Linke 用）：本网关的多数模型只收**公网 URL** 的参考素材
+// （上游 toapis 明确不吃 base64，网关也没转发它的上传接口），所以软件自己调 toapis 的
+// 上传接口把本地素材换成公网地址 —— 这一步需要一把 toapis 的密钥。留空也能用，
+// 只是那些模型无法引用本地素材（会在生成时给出提示）。
+const uploadApiKey = ref("");
 const revision = ref("");
 const formError = ref("");
 // 生成账号管理（豆包 / Dola）：浏览器自动化跑在本地 RPA 服务里（不在沙箱内），故直接跨域调用它。
 // 该服务已开 CORS，见 toonflow/scripts/doubao-rpa-service.ts。
 const RPA_BASE = "http://127.0.0.1:18077";
 const isDoubaoAccount = computed(() => provider?.id === "doubaoAccount");
+/** 素材上传通道只对 Linke（JinyuDream）有意义 —— 它就是 toapis 的中转上游。 */
+const isJinyuDream = computed(() => provider?.id === "JinyuDream");
 const doubaoAccounts = ref<{ id: string; name: string; accountType?: string; platformLabel?: string; hasLoggedIn: boolean; usedToday: number; dailyQuota: number; remaining: number; exhausted: boolean; busy: boolean }[]>([]);
 const accountsLoading = ref(false);
 const accountBusy = ref(false);
@@ -214,9 +231,10 @@ watch(visible, isVisible => {
   formError.value = "";
   modelEditorVisible.value = false;
   editingModelIndex.value = undefined;
-  const configs = settings.value.mediaProviderConfigs as Record<string, { apiKey?: unknown }> | undefined;
-  const configuredKey = provider && configs?.[provider.id]?.apiKey;
-  apiKey.value = typeof configuredKey === "string" ? configuredKey : "";
+  const configs = settings.value.mediaProviderConfigs as Record<string, { apiKey?: unknown; uploadApiKey?: unknown }> | undefined;
+  const configured = provider ? configs?.[provider.id] : undefined;
+  apiKey.value = typeof configured?.apiKey === "string" ? configured.apiKey : "";
+  uploadApiKey.value = typeof configured?.uploadApiKey === "string" ? configured.uploadApiKey : "";
   revision.value = provider?.revision ?? "";
   models.value = JSON.parse(JSON.stringify(provider?.models ?? []));
   if (isDoubaoAccount.value) void loadAccounts();
@@ -260,8 +278,10 @@ async function saveModels() {
       return { ...item, id, label };
     });
     if (apiKey.value.length > 8192) throw new Error("API Key 过长");
+    if (uploadApiKey.value.length > 8192) throw new Error("素材上传密钥过长");
     saving.value = true;
     const nextKey = apiKey.value.trim();
+    const nextUploadKey = uploadApiKey.value.trim();
     const { data } = await axios.put<{ code: number; data: MediaProvider; message?: string }>("/api/providers/media/save", {
       fileName, revision: revision.value, models: values,
     });
@@ -274,8 +294,8 @@ async function saveModels() {
       if (configs !== undefined && (!configs || typeof configs !== "object" || Array.isArray(configs))) throw new Error("媒体供应商配置格式无效");
       const current = configs?.[providerId];
       if (current !== undefined && (!current || typeof current !== "object" || Array.isArray(current))) throw new Error("当前供应商配置格式无效");
-      if (nextKey === (current?.apiKey ?? "")) return;
-      return { mediaProviderConfigs: { ...configs, [providerId]: { ...current, apiKey: nextKey } } };
+      if (nextKey === (current?.apiKey ?? "") && nextUploadKey === (current?.uploadApiKey ?? "")) return;
+      return { mediaProviderConfigs: { ...configs, [providerId]: { ...current, apiKey: nextKey, uploadApiKey: nextUploadKey } } };
     });
     configSaved = true;
     const response = await axios.get<{ code: number; data: MediaProvider[]; message?: string }>("/api/providers/media/list");
