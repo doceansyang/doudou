@@ -3,14 +3,19 @@
     <div v-if="apiKey" class="accountHeader">
       <div class="accountBalance">
         <el-text size="small" type="info">账户余额</el-text>
-        <el-skeleton v-if="loading && !balance" animated>
+        <el-skeleton v-if="loading && !balance && !unsupported" animated>
           <template #template><el-skeleton-item class="balancePlaceholder" variant="text" /></template>
         </el-skeleton>
-        <strong v-else class="balanceNumber">{{ balance ? numberFormat.format(balance.balance) : "—" }}</strong>
+        <strong v-else-if="balance" class="balanceNumber">{{ numberFormat.format(balance.balance) }}</strong>
+        <!-- 网关上没有余额接口时，别把 axios 的 "Request failed with status code 404"
+             原样抖给用户 —— 那看着像"我的 key 填错了"。这里给一句人话。 -->
+        <el-text v-else-if="unsupported" class="balanceHint" size="small" type="info">网关未提供此接口</el-text>
+        <strong v-else class="balanceNumber">—</strong>
       </div>
       <div class="accountActions">
         <el-button text circle :icon="IconRefresh" :loading="loading" :disabled="!apiKey" aria-label="刷新余额" title="刷新余额" @click="refresh" />
-        <el-button size="small" :icon="IconCreditCard" :disabled="!apiKey" @click="openRecharge">充值</el-button>
+        <el-button v-if="!unsupported" size="small" :icon="IconCreditCard" :disabled="!apiKey" @click="openRecharge">充值</el-button>
+        <el-button v-else tag="a" href="https://api.linke.link/console" target="_blank" rel="noopener noreferrer" size="small" :icon="IconExternalLink">网关控制台</el-button>
       </div>
     </div>
     <div v-if="!apiKey" class="accountSetup">
@@ -31,6 +36,11 @@
       <el-button tag="a" href="https://api.linke.link/" target="_blank" rel="noopener noreferrer" text type="primary" :icon="IconExternalLink">
         前往 Linke 官网 获取 API Key
       </el-button>
+    </div>
+    <div v-else-if="unsupported" class="accountNotice">
+      <el-text size="small" type="info">
+        API Key 已保存。当前网关（api.linke.link）不提供「密钥余额 / 充值」接口，余额与充值请到网关控制台查看。
+      </el-text>
     </div>
     <div v-else-if="errorMessage" class="accountError" role="alert">
       <el-text size="small" type="danger">{{ errorMessage }}</el-text>
@@ -77,6 +87,21 @@ const apiKey = computed(() =>
 const balance = ref<TfBalance>();
 const loading = ref(false);
 const errorMessage = ref("");
+/**
+ * 网关上根本没有余额接口（HTTP 404）。
+ *
+ * 背景：这套「余额 / 充值」接口（`/v1/balance`、`/v1/recharge/*`、`/web/*`）是
+ * **原版 Toonflow 私有后端**的；当初做品牌替换时是把域名整串替换过去的
+ * （见 `scripts/rebrand-api-to-linke.py`），而 api.linke.link 是个 **new-api 网关**，
+ * 只有 OpenAI 兼容的 `/v1/*` 与它自己的 `/api/*`，没有这些路由 —— 实测：
+ *   `GET /v1/models` -> 200（key 有效）
+ *   `GET /v1/balance` -> 404 Invalid URL
+ *   `/v1/dashboard/billing/*` -> 200 但值是**写死的占位**（hard_limit 1e8）
+ *   `/api/user/*` -> 401（要网页登录态，不认 sk key）
+ * 所以这里不再把 axios 的 404 原文抛给用户（看着像"key 填错了"），
+ * 改成明说"网关没这个接口"+ 给控制台入口；一旦换回支持该接口的网关，原逻辑自动恢复。
+ */
+const unsupported = ref(false);
 const draftKey = ref("");
 const saving = ref(false);
 const setupError = ref("");
@@ -110,6 +135,7 @@ async function refresh() {
   controller?.abort();
   loading.value = false;
   errorMessage.value = "";
+  unsupported.value = false;
   if (!apiKey.value || !props.visible) return;
   const request = new AbortController();
   controller = request;
@@ -119,11 +145,17 @@ async function refresh() {
     if (!request.signal.aborted) balance.value = result;
   } catch (error) {
     if (!request.signal.aborted) {
-      errorMessage.value = axios.isAxiosError<{ message?: string }>(error)
-        ? error.response?.data?.message || error.message
-        : error instanceof Error
-        ? error.message
-        : "余额查询失败，请重试";
+      // 404 = 这个网关上没有该路由，不是"你的 key 有问题"，所以走专门的提示分支
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined;
+      if (status === 404) {
+        unsupported.value = true;
+      } else {
+        errorMessage.value = axios.isAxiosError<{ message?: string }>(error)
+          ? error.response?.data?.message || error.message
+          : error instanceof Error
+          ? error.message
+          : "余额查询失败，请重试";
+      }
     }
   } finally {
     if (!request.signal.aborted) loading.value = false;
@@ -179,6 +211,13 @@ onBeforeUnmount(() => controller?.abort());
         width: 112px;
         height: 28px;
       }
+
+      // 替代大号数字的那句说明：字号掉一档，避免"看起来像余额数字"
+      .balanceHint {
+        font-size: 13px;
+        line-height: 1.3;
+        color: var(--el-text-color-secondary);
+      }
     }
 
     .accountActions {
@@ -197,6 +236,12 @@ onBeforeUnmount(() => controller?.abort());
     align-items: center;
     gap: 8px;
     margin-top: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .accountNotice {
+    margin-top: 12px;
+    line-height: 1.6;
     overflow-wrap: anywhere;
   }
 
