@@ -91,6 +91,22 @@ html.dark {
     --el-tag-border-color: var(--el-border-color);
   }
 
+  /* 分段控件（el-radio-button，如首页的「网格 / 列表」视图切换）：选中态 EP 用
+     「主色做底 + 白字」，主色近黑（#171717）时底色和页面底几乎同色 ——
+     实测选中格 (23,23,23) vs 页面底 (15~20)，只差几个亮度，就剩图标明暗
+     （255 vs 157）一个线索，一眼看不出选中了哪个。改成「主题中性底色 + 正文色
+     文字」，主色随便怎么设都清晰。
+
+     ⚠️ 必须打在 `.el-radio-button` 上，**不能打在 `.el-radio-group`（父级）上**：
+     EP 是把这个变量声明在 `.el-radio-button` 组件根自己的样式里的，
+     CSS 变量「元素自身声明」优先于「从祖先继承」—— 打在父级上会被原样盖掉，
+     改完毫无效果（本轮就这么白跑了一趟构建）。 */
+  .el-radio-button {
+    --el-radio-button-checked-bg-color: var(--el-fill-color-dark);
+    --el-radio-button-checked-border-color: var(--el-border-color);
+    --el-radio-button-checked-text-color: var(--el-text-color-primary);
+  }
+
   /* 不带 type 的普通按钮：EP 在「悬停 / 聚焦 / 按下」时把文字设成主色、
      底色设成主色浅调。主色近黑（#171717）时两者亮度只差个位数，
      整颗按钮糊成一块黑 ——用户报的「一悬停就变成黑块、文字全没了」就是这个。

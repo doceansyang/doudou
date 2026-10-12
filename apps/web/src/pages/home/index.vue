@@ -20,15 +20,16 @@
           </span>
           <el-card class="promptCard" shadow="never" :bodyStyle="{ padding: '20px' }" :footerStyle="{ padding: '12px 16px' }">
             <attachmentList v-if="promptAttachments.length" class="promptAttachments" :attachments="promptAttachments" removable restorable :disabled="creating || opening" @remove="promptAttachments.splice($event, 1)" @restore="restoreAttachment" />
-            <el-input ref="promptInput" v-model="prompt" type="textarea" :rows="4" resize="none" :disabled="creating || opening" :placeholder="promptPlaceholder" aria-label="创作描述" @paste.capture="pasteText" />
+            <el-input ref="promptInput" v-model="prompt" type="textarea" :autosize="{ minRows: 3, maxRows: 12 }" resize="none" :disabled="creating || opening" :placeholder="promptPlaceholder" aria-label="创作描述" @paste.capture="pasteText" />
             <template #footer>
               <div class="composerFooter">
                 <workspacePicker ref="promptWorkspacePicker" v-model="workspaceDirectory" :disabled="creating || opening" />
                 <el-space class="sendActions" wrap :size="12">
                   <modelPopover v-model="selectedModel" v-model:reasoningEffort="reasoningEffort" class="modelSelect" :disabled="creating || opening" />
-                  <el-button class="sendButton" type="primary" :circle="!!workspaceDirectory" :icon="workspaceDirectory ? IconArrowUp : IconFolder" :loading="creating" :disabled="creating || opening" :aria-label="workspaceDirectory ? '发送' : '选择工作目录'" @click="workspaceDirectory ? createProject() : promptWorkspacePicker?.chooseDirectory()">
-                    <template v-if="!workspaceDirectory" #default>选择工作目录</template>
-                  </el-button>
+                  <!-- 恒定圆形：早先没有工作目录时，这颗按钮会变形成「文件夹图标 + 选择工作目录」
+                       的长条，一选完目录又跳回圆形，整条 footer 跟着左右乱动。
+                       改成尺寸恒定，操作提示交给下方常驻的 workspaceHint 承担。 -->
+                  <el-button class="sendButton" type="primary" circle :icon="workspaceDirectory ? IconArrowUp : IconFolder" :loading="creating" :disabled="creating || opening" :aria-label="workspaceDirectory ? '发送' : '选择工作目录'" @click="workspaceDirectory ? createProject() : promptWorkspacePicker?.chooseDirectory()" />
                 </el-space>
               </div>
               <p v-if="!workspaceDirectory" class="workspaceHint" role="status">请先选择一个空文件夹作为工作目录，画布和素材会保存在这里。</p>
@@ -40,8 +41,10 @@
         <div class="sectionHeader">
           <h2 id="projectListTitle">项目列表</h2>
           <el-space wrap>
-            <el-button :icon="iconFolderOpen" :disabled="creating || opening" @click="openProject()">导入项目</el-button>
-            <el-button :icon="IconFolderPlus" :disabled="creating || opening" @click="createProject(false)">添加项目</el-button>
+            <!-- 措辞对齐真实行为：前者是「选一个已有目录打开」，后者是「新建一个空项目」。
+                 原来的「导入项目 / 添加项目」两个名字都不达意，用户分不清该点哪个。 -->
+            <el-button :icon="IconFolderOpen" :disabled="creating || opening" @click="openProject()" title="选择一个已有文件夹并打开">打开项目</el-button>
+            <el-button :icon="IconFolderPlus" :disabled="creating || opening" @click="createProject(false)" title="选择一个空文件夹作为新项目">新建项目</el-button>
             <el-button circle :icon="sortDescending ? IconSortDescending : IconSortAscending" :aria-label="sortDescending ? '按时间降序' : '按时间升序'" @click="sortDescending = !sortDescending" />
             <el-radio-group v-model="viewMode" aria-label="项目视图">
               <el-radio-button value="grid" aria-label="网格视图"><icon-layout-grid :size="16" /></el-radio-button>
@@ -50,13 +53,18 @@
           </el-space>
         </div>
         <div class="projectItems" :class="{ listView: viewMode === 'list' }">
+          <div v-if="!sortedProjects.length" class="projectEmpty" role="status">
+            <icon-folder-open :size="30" aria-hidden="true" />
+            <p class="projectEmptyTitle">还没有项目</p>
+            <p>在上方描述你的创意并发送，或点「新建项目」选一个空文件夹开始。</p>
+          </div>
           <el-card v-for="project in sortedProjects" :key="project.directory" class="projectCard" shadow="hover" :bodyStyle="{ padding: '0' }">
             <button class="projectEntry" type="button" :disabled="creating || opening" :aria-label="`打开项目 ${project.name}`" @click="openProject(project)">
               <icon-folder class="projectIcon" :size="28" aria-hidden="true" />
               <span class="projectInfo">
                 <span class="projectName" :title="project.name">{{ project.name }}</span>
-                <span class="projectPath" :title="project.directory">{{ project.directory }}</span>
-                <span class="projectTime">最近打开 {{ new Date(project.lastOpenedAt).toLocaleString(locale, { hour12: false }) }}</span>
+                <span class="projectPath" :title="project.directory">{{ shortPath(project.directory) }}</span>
+                <span class="projectTime" :title="new Date(project.lastOpenedAt).toLocaleString(locale, { hour12: false })">最近打开 {{ relativeTime(project.lastOpenedAt) }}</span>
               </span>
             </button>
             <div class="projectActions">
@@ -84,7 +92,7 @@ import {
   IconArrowUp, IconLayoutGrid,
   IconList, IconSortDescending,
   IconSortAscending, IconFolder, IconEdit,
-  IconTrash, IconFolderPlus, IconFolderOpen as iconFolderOpen,
+  IconTrash, IconFolderPlus, IconFolderOpen,
 } from "@tabler/icons-vue";
 import modelPopover from "@/components/modelPopover.vue";
 import attachmentList from "@/components/agent/attachmentList.vue";
@@ -270,6 +278,36 @@ function sameDirectory(left: string, right: string) {
   return !!left && !!right && normalize(left) === normalize(right);
 }
 
+/**
+ * 卡片上只显示路径的「盘符 + 末两级」。
+ *
+ * 为什么不能直接铺完整路径：一是会被 CSS 截成 `C:\Users\JinYuDream\AppDa…`，
+ * 用户读不出这个项目到底在哪；二是**本机用户名会跟着露出来**，截图分享即隐私泄露。
+ * 完整路径仍放在 title 里，悬停可看。
+ */
+function shortPath(directory: string) {
+  const parts = (directory ?? "").replace(/[\\/]+$/, "").split(/[\\/]+/).filter(Boolean);
+  if (parts.length <= 3) return directory;
+  return `${parts[0]}\\…\\${parts.slice(-2).join("\\")}`;
+}
+
+/**
+ * 把「最近打开」压成相对时间（刚刚 / N 分钟前 / N 小时前 / N 天前 / 具体日期）。
+ * 原先精确到秒（`2026/10/12 11:32:29`），信息密度低又占满一整行。精确时间留在 title 里。
+ */
+function relativeTime(timestamp: number) {
+  if (!timestamp) return "未知";
+  const diff = Date.now() - timestamp;
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return "刚刚";
+  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
+  return new Date(timestamp).toLocaleDateString(locale.value, { hour12: false });
+}
+
 async function createProject(fromPrompt = true) {
   if (creating.value || opening.value || (fromPrompt && !workspaceDirectory.value)) return;
   creating.value = true;
@@ -353,16 +391,14 @@ async function createProject(fromPrompt = true) {
     font-size: 13px;
     white-space: nowrap;
     pointer-events: none;
-    animation: hintNudge 2.4s ease-in-out infinite;
 
+    // 去掉了常驻的左右摆动（原 hintNudge 2.4s 无限循环）：首页本来就有
+    // 「品牌字渐变流动」和「占位符打字机」两个常驻动画，三处同时动太吵。
+    // 手绘箭头的形态保留，只是不再动。
     svg {
       width: 56px;
       height: 30px;
       flex-shrink: 0;
-    }
-
-    @media (prefers-reduced-motion: reduce) {
-      animation: none;
     }
   }
 
@@ -380,7 +416,9 @@ async function createProject(fromPrompt = true) {
     padding: 24px clamp(20px, 4vw, 56px) 56px;
 
     .creationPanel {
-      max-width: 800px;
+      // 与 .projectList 用同一个宽度：原先 800 vs 1040 会让上下两块的左边缘错开一截，
+      // 页面看着没对齐。统一到 1040 后，输入区与项目列表左右边界齐平。
+      max-width: 1040px;
       margin: clamp(32px, 6vh, 64px) auto 56px;
 
       .brand {
@@ -505,6 +543,25 @@ async function createProject(fromPrompt = true) {
 
         &.listView { grid-template-columns: 1fr; }
 
+        // 空状态：原先项目为 0 时这里是一整块空白，没有任何引导。
+        .projectEmpty {
+          grid-column: 1 / -1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 4px;
+          padding: 44px 24px;
+          border: 1px dashed var(--el-border-color);
+          border-radius: calc(var(--ui-radius) * 2);
+          color: var(--el-text-color-secondary);
+          text-align: center;
+
+          svg { color: var(--el-text-color-secondary); }
+
+          p { margin: 0; font-size: 13px; line-height: 1.7; }
+          .projectEmptyTitle { margin-top: 8px; font-size: 15px; font-weight: 600; color: var(--el-text-color-primary); }
+        }
+
         .projectCard {
           position: relative;
           // 项目卡片同样是玻璃面（它压在波浪亮部上，62% 是实测能压住底噪的下限）
@@ -518,8 +575,24 @@ async function createProject(fromPrompt = true) {
             right: 8px;
             display: flex;
             gap: 4px;
+            // 默认隐去：常驻的红色删除按钮在深色卡片上过于抢眼，而且贴在手最容易点到的地方。
+            // 卡片悬停 / 键盘聚焦时再浮出（:focus-within 保证 Tab 也能操作到）。
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.16s ease;
 
             .el-button { width: 32px; height: 32px; margin: 0; padding: 0; }
+          }
+
+          &:hover .projectActions,
+          &:focus-within .projectActions {
+            opacity: 1;
+            pointer-events: auto;
+          }
+
+          // 触屏设备没有 hover，常驻显示，否则这两个操作永远点不到
+          @media (hover: none) {
+            .projectActions { opacity: 1; pointer-events: auto; }
           }
         }
 
@@ -539,7 +612,11 @@ async function createProject(fromPrompt = true) {
           &:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: -2px; }
           &:disabled { cursor: wait; opacity: 0.6; }
 
-          .projectIcon { flex-shrink: 0; color: var(--el-color-primary); }
+          // ⚠️ 必须用可读品牌前景色，**不能**直接用主色：
+          //    主色被设成近黑 #171717 时，这个图标会变成「比卡片底更暗的轮廓」——
+          //    实测该区域最亮像素只有 (42,38,55)，比卡片底高不了几级，几乎看不见。
+          //    （与本文件 arrowHint 是同一个坑，那边早就改过了，这里漏了。）
+          .projectIcon { flex-shrink: 0; color: var(--ui-brand-foreground, var(--el-color-primary)); }
 
           .projectInfo {
             display: flex;
@@ -577,11 +654,6 @@ async function createProject(fromPrompt = true) {
       }
     }
   }
-}
-
-@keyframes hintNudge {
-  0%, 100% { transform: translateX(0) rotate(-3deg); }
-  50% { transform: translateX(-6px) rotate(-5deg); }
 }
 
 // 品牌字的渐变流动：从 0% 移到 100% 再回到 0%（animation-direction: alternate 即 yoyo）
