@@ -15,7 +15,15 @@
       <div class="accountActions">
         <el-button text circle :icon="IconRefresh" :loading="loading" :disabled="!apiKey" aria-label="刷新余额" title="刷新余额" @click="refresh" />
         <el-button v-if="!unsupported" size="small" :icon="IconCreditCard" :disabled="!apiKey" @click="openRecharge">充值</el-button>
-        <el-button v-else tag="a" href="https://api.linke.link/console" target="_blank" rel="noopener noreferrer" size="small" :icon="IconExternalLink">网关控制台</el-button>
+        <!--
+          直达网关的**真实余额页** /wallet（实测：它会 302 到
+          `https://api.linke.link/sign-in?redirect=%2Fwallet`，即"需登录的真实路由"；
+          而那个 SPA 对任意路径都返回同一份 200 HTML，所以光看状态码判别不了）。
+          `target="_blank"` 不是"弹新窗口"：启动器把 NewWindowRequested 接管成
+          **原地导航**，于是会在软件窗口里打开、并显示「外部网页」返回条
+          （Alt+← 或点「← 返回 JinyuTV」回到软件）。登录一次后 cookie 常驻。
+        -->
+        <el-button v-else tag="a" href="https://api.linke.link/wallet" target="_blank" rel="noopener noreferrer" size="small" :icon="IconExternalLink">查看余额</el-button>
       </div>
     </div>
     <div v-if="!apiKey" class="accountSetup">
@@ -39,7 +47,7 @@
     </div>
     <div v-else-if="unsupported" class="accountNotice">
       <el-text size="small" type="info">
-        API Key 已保存。当前网关（api.linke.link）不提供「密钥余额 / 充值」接口，余额与充值请到网关控制台查看。
+        当前网关（api.linke.link）不提供「密钥余额」接口，所以这里读不到数字。点右侧「查看余额」会在软件内打开网关的余额页（首次需登录，之后免登录）。
       </el-text>
     </div>
     <div v-else-if="errorMessage" class="accountError" role="alert">

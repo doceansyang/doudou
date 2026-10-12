@@ -62,7 +62,7 @@ const info = await page.evaluate(() => {
   const txt = (sel) => document.querySelector(sel)?.textContent?.trim() ?? null;
   const has = (sel) => !!document.querySelector(sel);
   const btn = (label) => Array.from(root.querySelectorAll("button, a")).find((b) => (b.textContent || "").includes(label)) || null;
-  const consoleLink = btn("网关控制台");
+  const consoleLink = btn("查看余额");
   return {
     balanceLabel: txt(".accountBalance .el-text"),
     balanceNumber: txt(".balanceNumber"),
@@ -84,8 +84,8 @@ console.log("  说明段        :", info.notice);
 console.log("  充值按钮      :", info.rechargeBtn, "（网关无接口时应为 false）");
 console.log("  控制台链接    :", info.consoleHref);
 console.log("  页面是否出现 404 字样:", info.raw404Shown, "（应为 false）");
-console.log("  判定:", !info.raw404Shown && !info.rechargeBtn && info.consoleHref
-  ? "✅ 已降级为「网关未提供接口 + 控制台入口」"
+console.log("  判定:", !info.raw404Shown && !info.rechargeBtn && (info.consoleHref || "").endsWith("/wallet")
+  ? "✅ 已降级为「网关未提供接口 + 直达余额页 /wallet」"
   : "⚠️ 与预期不符");
 
 const box = await page.locator(".tfAccount").first().boundingBox();
