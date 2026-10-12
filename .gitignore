@@ -71,3 +71,5 @@ scripts/_ctor_old.txt
 scripts/_ctor_new.txt
 scripts/_c_old.txt
 scripts/_c_new.txt
+scripts/_*.txt
+scripts/launcher.cs.bak-*
