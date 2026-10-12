@@ -471,6 +471,10 @@ class JinyuTVLauncher
         public int BorderWidth = 1;
         /// <summary>禁用按下的"下沉感"。</summary>
         public bool PressedShift = true;
+        /// <summary>
+        /// 自绘按钮要铺的底色（= 窗体底色，通常纯黑）。**必须由调用方显式指定**。
+        /// </summary>
+        public Color BgColor = Color.FromArgb(0x11, 0x11, 0x13);
 
         enum BtnState { Normal, Hover, Pressed }
         BtnState _state = BtnState.Normal;
@@ -479,8 +483,59 @@ class JinyuTVLauncher
         {
             FlatStyle = FlatStyle.Flat;
             FlatAppearance.BorderSize = 0;
+            // ⚠️ ButtonBase 默认置了 ControlStyles.Opaque —— 这意味着框架**永远不调
+            //    OnPaintBackground**（实测：把 OnPaintBackground 全填成亮红，渲染出来
+            //    一个红像素都没有）。于是圆角路径盖不到的四角**没有任何人负责绘制**，
+            //    直接露出窗口里残留的旧像素/父级底色，看起来就是"抠图没抠干净"
+            //    （实测按钮顶边 (24,24,24)、下沿两角 (29,29,29)）。
+            //    这里显式关掉 Opaque，同时清掉 Opaque 带来的"不擦背景"行为。
+            SetStyle(ControlStyles.Opaque, false);
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
-                     | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                     | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
+                     | ControlStyles.SupportsTransparentBackColor, true);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyRoundRegion();
+        }
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            ApplyRoundRegion();
+        }
+
+        /// <summary>
+        /// 把控件 Region 裁成圆角路径。这样圆角之外**根本不属于本控件**，
+        /// 天然由父级（纯黑）负责绘制，双保险杜绝灰角。
+        /// </summary>
+        void ApplyRoundRegion()
+        {
+            if (Width <= 1 || Height <= 1) return;
+            using (var path = Rounded.Rect(new RectangleF(0, 0, Width, Height), Radius))
+            {
+                var old = Region;
+                Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// ⚠️ 必须自己铺底，否则"抠图不干净"。
+        ///
+        /// 踩过的坑：RoundedButton 是**唯一**没有覆写 OnPaintBackground 的自绘控件。
+        /// 开 UserPaint 后框架仍会在 OnPaint 之前调一次基类 OnPaintBackground ——
+        /// 它会用 BackColor 把**整个矩形**填一遍。圆角路径永远盖不满四角，
+        /// 于是按钮圆角外沿露出一圈**灰边 + 两个灰角**（实测顶边 (24,24,24)、
+        /// 左下角 (29,29,29)），看起来就像"抠图没抠干净"。
+        /// 正解：铺成窗体底色（纯黑），与背景同色后边缘才干净。
+        /// </summary>
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (Width <= 0 || Height <= 0) return;
+            using (var br = new SolidBrush(BgColor)) e.Graphics.FillRectangle(br, 0, 0, Width, Height);
         }
 
         protected override void OnMouseEnter(EventArgs e) { _state = BtnState.Hover; Invalidate(); base.OnMouseEnter(e); }
@@ -1175,6 +1230,7 @@ public LicenseForm(string machine, string reason)
                 Text = "复制",
                 Bounds = new Rectangle(FIELD_PAD + fieldW + COPY_GAP, 46, COPY_W, FIELD_H),
                 BackColor = surfaceHi,
+                BgColor = surface,          // 按钮在卡片里 → 铺底＝卡片面色，不是窗体底色
                 ForeColor = textPri,
                 BorderColor = borderSub,
                 Font = new Font("Microsoft YaHei UI", 9.5F),
@@ -1292,6 +1348,7 @@ public LicenseForm(string machine, string reason)
                 Bounds = new Rectangle(btnRight - BTN_PRIMARY_W, BTN_Y, BTN_PRIMARY_W, BTN_H),
                 GradientFrom = brandA,
                 GradientTo = brandB,
+                BgColor = bgPage,          // 铺底＝窗体底色，杜绝圆角外的灰边
                 ForeColor = Color.White,
                 Font = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Bold),
                 TabStop = false,
@@ -1305,6 +1362,7 @@ public LicenseForm(string machine, string reason)
                 Text = "取消",
                 Bounds = new Rectangle(btnRight - BTN_PRIMARY_W - BTN_GAP - BTN_SUB_W, BTN_Y, BTN_SUB_W, BTN_H),
                 BackColor = surface,
+                BgColor = bgPage,          // 铺底＝窗体底色，杜绝圆角外的灰边
                 ForeColor = textSec,
                 BorderColor = borderSub,
                 Font = new Font("Microsoft YaHei UI", 10F),
