@@ -1,6 +1,6 @@
 import { loadSkillsFromDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { readFile } from "@toonflow/file";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Router } from "express";
 import { success } from "@/lib/responseFormat";
 import u from "@/utils";
@@ -18,12 +18,19 @@ export default router.get("/", async (_req, res) => {
       const url = new URL(metadata.github);
       if (url.origin === "https://github.com" && !url.username && !url.password) github = url.href;
     }
+    // 技能自带的名字常常和市场的 identifier 不同（权威名称在包里），靠安装时落下的来源文件对齐。
+    let marketIdentifier = "";
+    try {
+      const origin = JSON.parse(await readFile(join(dirname(skill.filePath), u.skillFile.marketFileName), "utf8")) as { identifier?: unknown };
+      if (typeof origin.identifier === "string") marketIdentifier = origin.identifier.trim();
+    } catch { /* 本地安装的技能没有来源记录，属正常情况 */ }
     return {
       name: skill.name,
       version: typeof metadata.version === "string" ? metadata.version.trim() : "",
       displayName: typeof metadata.displayName === "string" && metadata.displayName.trim() ? metadata.displayName : skill.name,
       description: skill.description,
       author: typeof metadata.author === "string" ? metadata.author : "",
+      marketIdentifier,
       github,
     };
   }));

@@ -25,4 +25,10 @@ export interface Plugin {
   kind?: "local" | "remote";
   cardUrl?: string;
   loadError?: string;
+  /**
+   * 这个已安装插件是从市场哪个 identifier 装来的（安装时由服务端落下 `.toonflowMarket.json`）。
+   * 市场的 identifier 和技能自报的名字经常不是同一个：后者以上游包里的 name 为准，
+   * 所以「装没装」不能只看 identifier —— 没有这条来源记录，装好了也一直显示「安装」。
+   */
+  marketIdentifier?: string;
 }

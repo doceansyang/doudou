@@ -7,6 +7,14 @@ import { isWithin, writeWorkspaceFile } from "@/utils/workspace/files";
 export const maxBytes = 20 * 1024 * 1024;
 // 记录附属文件的手动排序；不改动真实文件名，避免影响 SKILL.md 内部的相对链接。
 const orderFileName = ".toonflowOrder.json";
+/**
+ * 记录技能是**从插件市场哪一个 identifier 装来的**。
+ *
+ * 市场的 identifier（`foodAestheticShortFilm`）与技能自己的名字（`food-aesthetic-short-film`）
+ * 常常不是一个东西 —— 上游包里的 name 才是权威值。没有这条来源记录，市场列表就只能靠猜，
+ * 于是装好了也一直显示「安装」。见 installSkill 的 marketIdentifier 参数。
+ */
+export const marketFileName = ".toonflowMarket.json";
 
 export function directory() {
   return resolve(dirname(conf.path), "skills");
@@ -136,7 +144,7 @@ export async function list(name: string) {
   const files: string[] = [];
   async function walk(dir: string, prefix: string) {
     for (const entry of await readdir(dir, { withFileTypes: true })) {
-      if (entry.isSymbolicLink() || (!prefix && entry.name === orderFileName)) continue;
+      if (entry.isSymbolicLink() || (!prefix && (entry.name === orderFileName || entry.name === marketFileName))) continue;
       if (files.length >= 2000) throw Object.assign(new Error("技能文件过多，无法列出"), { status: 413 });
       const entryPath = resolve(dir, entry.name);
       const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;

@@ -3,13 +3,14 @@ import { mkdir, mkdtemp, lstat, readFile, readdir, rename, rm, unlink, writeFile
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { crc32, inflateRawSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import type { PluginInstallType } from "@/types/desktop";
 import conf from "@/utils/conf";
 import { parseTool, toolsDirectory } from "@/utils/plugins/tools";
 import { extDirectory, parseExt } from "@/utils/plugins/ext";
 import { addMediaProvider } from "@/utils/media/provider";
-import { isSafeSegment } from "@/utils/skills/files";
+import { isSafeSegment, marketFileName } from "@/utils/skills/files";
 import { isWithin, lockWorkspaceFiles, writeWorkspaceFile } from "@/utils/workspace/files";
 
 const maxBytes = 20 * 1024 * 1024;
@@ -343,7 +344,132 @@ async function skillArchive(bytes: Uint8Array) {
   return result;
 }
 
-export async function installSkill(fileName: string, bytes: Uint8Array, force = false) {
+/**
+ * ## 为什么技能包需要「元数据修复」
+ *
+ * Agent Skills 规范（`skills` 加载器同款实现）要求 SKILL.md 前言里必须有合法的
+ * `name`（小写短横线、≤64）和 `description`（≤1024），**缺 description 的技能装上也读不出来**
+ * （加载器会静默丢弃）。而市场上游的数据并不都合规 —— 实测「舌尖美食-美学短片」这个包：
+ *
+ *   · 根本没有 `---` 前言围栏，只在正文开头写了两行 `skill_name:` / `skill_description:`；
+ *   · `skill_name` 还是中文。
+ *
+ * 于是安装直接被 name 校验挡掉。这里采取「**补元数据，不放宽闸门**」的做法：
+ * 名字照旧由安全规则生成（仍要过 `isSafeSegment` + 名称正则），description 一定补上，
+ * **正文一字不改**，只把合规前言写在文件最前面；原来的中文名存进 `metadata.displayName`，
+ * 界面上显示的还是「舌尖美食-美学短片」。
+ */
+const maxSkillNameLength = 64;
+const maxSkillDescriptionLength = 1024;
+/** 应用原本接受的包名门槛（小驼峰或短横线）——不放宽，不合规的走改名安装。 */
+const declaredSkillName = /^[a-z0-9][a-zA-Z0-9]*(?:-[a-zA-Z0-9]+)*$/;
+
+function unquote(value: string) {
+  const trimmed = value.trim();
+  return trimmed.length > 1 && /^(["']).*\1$/s.test(trimmed) ? trimmed.slice(1, -1).trim() : trimmed;
+}
+
+/** 读取没有 `---` 围栏、把 `key: value` 直接写在正文开头的包头；扫不到就当正文看待（不改动内容）。 */
+function looseManifestFields(source: string) {
+  const fields: Record<string, string> = {};
+  const lines = source.replace(/^\uFEFF/, "").split(/\r?\n/);
+  for (const [index, line] of lines.entries()) {
+    if (index > 20) break;
+    const trimmed = line.trim();
+    if (!trimmed) { if (Object.keys(fields).length) break; continue; }
+    if (trimmed === "---") break;
+    const match = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.+)$/.exec(trimmed);
+    if (!match) break;
+    const value = unquote(match[2]!);
+    if (value) fields[match[1]!.toLowerCase()] ??= value;
+  }
+  return fields;
+}
+
+/** 压成加载器零警告的 name：纯小写短横线。全是中文等无 Latin 字符时返回空串，由调用方换候选。 */
+export function skillNameSlug(value: string) {
+  return value.replace(/([a-z0-9])([A-Z])(?=[a-z])/g, "$1-$2")
+    .replace(/[^A-Za-z0-9]+/g, " ").trim().toLowerCase().split(/\s+/).filter(Boolean).join("-")
+    .slice(0, maxSkillNameLength).replace(/-+$/, "");
+}
+
+/** 候选依次降级：包名 → 包头里的别名 → 下载链接里的 identifier → 文件名 → 稳定哈希（保证有结果）。 */
+function resolvedSkillName(candidates: (string | undefined)[]) {
+  for (const candidate of candidates) {
+    const slug = candidate ? skillNameSlug(candidate) : "";
+    if (slug) return slug;
+  }
+  return `skill-${createHash("sha256").update(candidates.find(candidate => candidate) ?? "").digest("hex").slice(0, 8)}`;
+}
+
+/** description 实在取不到时，拿正文第一个标题顶上，总好过技能被加载器丢掉。 */
+function skillDescriptionFallback(source: string, name: string) {
+  const heading = /^\s{0,3}#{1,3}\s+(.+?)\s*$/m.exec(source.replace(/^\uFEFF/, ""))?.[1]?.replace(/[#*`_]/g, "").trim();
+  return (heading || name).slice(0, maxSkillDescriptionLength);
+}
+
+/** 标量按 YAML 双引号风格写（JSON 的转义 YAML 全认），容器走流样式。 */
+function yamlInline(value: unknown): string {
+  if (value === undefined || value === null) return "null";
+  if (Array.isArray(value)) return `[${value.map(item => yamlInline(item)).join(", ")}]`;
+  if (typeof value === "object") return `{${Object.entries(value).map(([key, item]) => `${yamlInline(key)}: ${yamlInline(item)}`).join(", ")}}`;
+  return typeof value === "string" ? JSON.stringify(value) : String(value);
+}
+
+function yamlBlock(value: Record<string, unknown>, indent = ""): string {
+  return Object.entries(value).map(([key, item]) => {
+    const keyText = `${indent}${/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key) ? key : JSON.stringify(key)}:`;
+    if (Array.isArray(item)) return item.length ? [keyText, ...item.map(entry => `${indent}  - ${yamlInline(entry)}`)].join("\n") : `${keyText} []`;
+    if (item && typeof item === "object") {
+      const nested = yamlBlock(item as Record<string, unknown>, `${indent}  `);
+      return nested ? `${keyText}\n${nested}` : `${keyText} {}`;
+    }
+    return `${keyText} ${yamlInline(item)}`;
+  }).filter(Boolean).join("\n");
+}
+
+/**
+ * 给前言不合规的 SKILL.md 补一份合规前言。已经合规的原样返回（`repaired: false`），
+ * 否则把 `name`/`description` 放最前、其余字段原顺序保留，中文名落到 `metadata.displayName`。
+ */
+export function repairSkillManifest(source: string, suggestedName?: string, fileStem?: string) {
+  const fenced = /^\uFEFF?---/.test(source);
+  let frontmatter: Record<string, unknown> = {};
+  if (fenced) {
+    try { frontmatter = parseFrontmatter(source).frontmatter ?? {}; }
+    catch { frontmatter = {}; }
+  }
+  const loose = fenced ? {} : looseManifestFields(source);
+  const declaredName = [frontmatter.name, loose.skill_name, loose.name].find(value => typeof value === "string" && value.trim()) as string | undefined;
+  const declaredDescription = [frontmatter.description, loose.skill_description, loose.description]
+    .find(value => typeof value === "string" && value.trim()) as string | undefined;
+  const existingName = typeof frontmatter.name === "string" ? frontmatter.name : "";
+  const existingDescription = typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
+  const nameValid = !!existingName && existingName.length <= maxSkillNameLength && declaredSkillName.test(existingName);
+  const descriptionValid = !!existingDescription && existingDescription.length <= maxSkillDescriptionLength;
+  if (nameValid && descriptionValid) return { text: source, name: existingName, description: existingDescription, repaired: false };
+
+  const name = resolvedSkillName([frontmatter.name as string | undefined, declaredName, suggestedName, fileStem]);
+  const chosen = (descriptionValid ? existingDescription : declaredDescription ?? skillDescriptionFallback(source, declaredName ?? name)).trim();
+  const description = chosen.length > maxSkillDescriptionLength ? `${chosen.slice(0, maxSkillDescriptionLength - 1).trimEnd()}…` : chosen;
+  const metadata = frontmatter.metadata && typeof frontmatter.metadata === "object" && !Array.isArray(frontmatter.metadata)
+    ? { ...frontmatter.metadata as Record<string, unknown> } : {};
+  if (declaredName && declaredName !== name) metadata.displayName ??= declaredName;
+  const rest = Object.entries(frontmatter).filter(([key]) => !["name", "description", "metadata"].includes(key));
+  const merged: Record<string, unknown> = { name, description, ...Object.fromEntries(rest) };
+  if (Object.keys(metadata).length) merged.metadata = metadata;
+
+  // ACT: 有围栏就换掉围栏内的内容（正文保留原样），没围栏就在文首加一段、原文一字不动。
+  let body = source;
+  if (fenced) {
+    const text = source.replace(/^\uFEFF/, "");
+    const end = text.indexOf("\n---", 3);
+    if (end !== -1) body = text.slice(end + 4).replace(/^(\r?\n)+/, "");
+  }
+  return { text: `---\n${yamlBlock(merged)}\n---\n\n${body}`, name, description, repaired: true };
+}
+
+export async function installSkill(fileName: string, bytes: Uint8Array, force = false, marketIdentifier?: string) {
   if (!fileName || fileName.length > 128 || /[\\/]/.test(fileName) || !/\.(md|zip|tar|tar\.gz|tgz)$/i.test(fileName)) invalid("请选择 .zip、.md、.tar、.tar.gz 或 .tgz 技能文件");
   skillPath(fileName);
   if (!bytes.byteLength) invalid("技能文件不能为空");
@@ -354,6 +480,9 @@ export async function installSkill(fileName: string, bytes: Uint8Array, force = 
   const manifest = manifests[0]!;
   const prefix = manifest.slice(0, -8);
   if ([...files.keys()].some(path => !path.startsWith(prefix))) invalid("技能资源必须位于 SKILL.md 所在目录内");
+  // ACT: 先补元数据再校验，让市场上那些「没有前言 / 中文名」的包也能装上；正文内容保持原样。
+  const repair = repairSkillManifest(decodeText(files.get(manifest)!), marketIdentifier, fileName.replace(/\.[^.]+$/, ""));
+  if (repair.repaired) files.set(manifest, Buffer.from(repair.text, "utf8"));
   let frontmatter: Record<string, unknown>;
   try { ({ frontmatter } = parseFrontmatter(decodeText(files.get(manifest)!))); }
   catch { return invalid("SKILL.md 前言格式无效"); }
@@ -412,7 +541,17 @@ export async function installSkill(fileName: string, bytes: Uint8Array, force = 
       }
       throw error;
     }
-    return { name };
+    // ACT: 记下"来自市场哪个 identifier"，市场列表才能把它认成已安装；本地 zip 装的没有这条，
+    //      残留的旧记录要顺手清掉（否则换了个来源会对错人）。来源标签写不进去不该让安装失败。
+    const provenance = join(target, marketFileName);
+    try {
+      if (marketIdentifier) await writeWorkspaceFile(provenance, `${JSON.stringify({ identifier: marketIdentifier }, null, 2)}\n`);
+      else await unlink(provenance);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("技能来源记录写入失败", error);
+    }
+    // repaired：包名元数据原本不合规、已按规范补齐（界面可据此提示用户"技能名已自动规范化"）。
+    return { name, repaired: repair.repaired };
   } finally {
     try {
       if (temporary && !preserveBackup && temporary !== root && isWithin(root, temporary)) {
@@ -420,6 +559,17 @@ export async function installSkill(fileName: string, bytes: Uint8Array, force = 
       }
     } finally { release(); }
   }
+}
+
+/** 市场下载链接形如 `/plugins/skill/<identifier>/<version>/<file>`：取 identifier 作为改名依据（中文名包的救命稻草）。 */
+export function pluginIdentifierFromUrl(address: URL) {
+  const parts = address.pathname.split("/")
+    .map(part => { try { return decodeURIComponent(part).replace(/[\s\u00a0\u3000]/g, ""); } catch { return part; } })
+    .filter(Boolean);
+  for (let index = parts.length - 1; index > 0; index--) {
+    if (/^\d+(?:\.\d+){1,3}$/.test(parts[index]!) && /^[A-Za-z0-9][A-Za-z0-9-]{2,63}$/.test(parts[index - 1]!)) return parts[index - 1]!;
+  }
+  return undefined;
 }
 
 export async function installRemotePlugin(type: PluginInstallType, url: string, fileName?: string, force = false) {
@@ -436,7 +586,7 @@ export async function installRemotePlugin(type: PluginInstallType, url: string, 
   if (!patterns[type].test(fileName)) invalid(t`下载文件名“${fileName.slice(0, 128)}”不符合 ${type} 类型规范，文件名示例：${examples[type]}；改名后请重新生成下载链接`);
   const bytes = await download(url, type === "provider" ? 2 * 1024 * 1024 : maxBytes, { node: "节点", ext: "文件扩展", tool: "工具", skill: "技能", provider: "供应商", agent: "团队" }[type]);
   if (type === "agent") return (await import("@/utils/teams/install")).installTeam(fileName, bytes, force);
-  if (type === "skill") return installSkill(fileName, bytes, force);
+  if (type === "skill") return installSkill(fileName, bytes, force, pluginIdentifierFromUrl(address));
   const source = decodeText(bytes);
   if (type === "node") return installNode(fileName, source, force);
   if (type === "ext") return installExt(fileName, source, force);

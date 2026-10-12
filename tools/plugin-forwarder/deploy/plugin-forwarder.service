@@ -1,0 +1,34 @@
+# JinyuTV 插件中转服务 —— systemd 单元
+#
+# 放到 /etc/systemd/system/plugin-forwarder.service
+# 环境变量放 /etc/plugin-forwarder.env（不要写进本文件，避免进 git）：
+#   chmod 600 /etc/plugin-forwarder.env
+#   /etc/plugin-forwarder.env 内容：
+#     TOONFLOW_MARKET_KEY=sk-xxx        # Toonflow 那边的 key（建议单独开一个没有余额的账号）
+#     PORT=8787
+#     PUBLIC_BASE_URL=https://你的站点  # 写死后不依赖 X-Forwarded-Host，推荐
+#     PROXY_DOWNLOAD=1                  # 1=下载地址也走本服务（客户端侧不再出现上游域名）
+#     CACHE_SECONDS=30                  # 上游下载链是 1 小时预签名，别超过 3600
+
+[Unit]
+Description=JinyuTV plugin forwarder
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/plugin-forwarder
+EnvironmentFile=/etc/plugin-forwarder.env
+ExecStart=/usr/bin/node /opt/plugin-forwarder/server.mjs
+Restart=always
+RestartSec=3
+
+# 最小权限：拿不到上游 key 之外的东西，也不该写任何目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/plugin-forwarder
+
+[Install]
+WantedBy=multi-user.target

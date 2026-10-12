@@ -7,12 +7,15 @@
         <button class="navButton" type="button" :aria-pressed="activeTab === 'ffmpeg'" @click="activeTab = 'ffmpeg'">FFmpeg</button>
       </nav>
       <div class="marketActions">
-        <el-button tag="a" href="https://api.linke.link/console/plugIn" target="_blank" rel="noopener noreferrer" size="small" text :icon="IconExternalLink">
-          网页版市场
-        </el-button>
-        <el-button tag="a" href="https://qcn7xdsqgc4z.feishu.cn/docx/KNBNd9naqolsy6xjAOCcEAkqnRd" target="_blank" rel="noopener noreferrer" size="small" text :icon="IconBook">
-          开发者文档
-        </el-button>
+        <!--
+          「网页版市场」「开发者文档」两个入口已**整体删除**（2026-10-13，用户口径）：
+          它们只是"上哪儿找插件"用的，指向的是 **Toonflow 自己的**控制台与飞书文档 ——
+          放在我们的界面里等于把 toonflow 字样递给用户。
+          要进那个控制台我们自己用浏览器访问即可；插件安装不依赖这两个入口
+          （点「安装」是由服务端拿市场**当场返回**的签名链去下，见 installMarketPlugin）。
+          也没有"管理员/用户两套版本"这回事：链接签名只有 1 小时有效期，存清单必然失效，
+          现查现装本来就是同一条链路，一套版本就够。
+        -->
         <template v-if="activeTab === 'installed'">
           <el-button v-if="selectedType === 'ext' || selectedType === 'all'" size="small" :icon="IconSettings" @click="associationsVisible = true">默认打开方式</el-button>
           <el-button size="small" type="primary" :icon="IconUpload" :loading="installing" aria-label="安装本地插件" @click="pluginFileInput?.click()">
@@ -58,24 +61,7 @@
       <template v-if="activeTab === 'installed'">
         <el-alert v-for="message in visibleLoadErrors" :key="message" class="loadError" :title="message" type="error" :closable="false" showIcon />
       </template>
-      <el-card v-else-if="marketNeedsKey" class="marketKey" shadow="never">
-        <el-text size="small">{{ marketError }}</el-text>
-        <form class="keyForm" @submit.prevent="saveMarketKey">
-          <el-input
-            v-model="draftKey"
-            type="password"
-            showPassword
-            autocomplete="off"
-            :maxlength="8192"
-            placeholder="填写 Linke API Key"
-            aria-label="Linke API Key"
-            :disabled="savingKey" />
-          <el-button type="primary" nativeType="submit" :loading="savingKey" :disabled="!draftKey.trim()">保存并继续</el-button>
-        </form>
-        <el-text v-if="keyError" type="danger" size="small" role="alert">{{ keyError }}</el-text>
-        <el-link href="https://api.linke.link/" target="_blank" rel="noopener noreferrer" type="primary">前往 Linke 获取 API Key</el-link>
-      </el-card>
-      <el-alert v-else-if="marketError" class="loadError" :title="marketError" type="error" :closable="false" showIcon>
+      <el-alert v-if="marketError" class="loadError" :title="marketError" type="error" :closable="false" showIcon>
         <el-button size="small" @click="marketRefreshKey++">重试</el-button>
       </el-alert>
 
@@ -113,7 +99,7 @@
                   <icon-external-link :size="14" aria-hidden="true" />
                 </a>
               </h3>
-              <span class="pluginId" :title="plugin.name">{{ plugin.name }}</span>
+              <span class="pluginId" :title="displayIdentifier(plugin)">{{ displayIdentifier(plugin) }}</span>
             </div>
             <el-tag :type="pluginTypes[plugin.type].tagType" size="small">{{ pluginTypes[plugin.type].label }}</el-tag>
           </div>
@@ -285,7 +271,7 @@
         appendToBody
         destroyOnClose>
         <div class="pluginContent" tabindex="0" aria-label="插件说明">
-          <messageMarkdown :content="selectedPlugin.readme ?? ''" />
+          <messageMarkdown :content="brandify(selectedPlugin.readme ?? '')" />
         </div>
       </el-dialog>
     </template>
@@ -297,12 +283,10 @@ import { translate } from "@toonflow/i18n/vue";
 import axios from "axios";
 import parse from "semver/functions/parse";
 import { computed, defineAsyncComponent, markRaw, onMounted, onBeforeUnmount, ref, watch } from "vue";
-import { IconBox, IconBook, IconTool, IconFileText, IconExternalLink, IconSparkles2, IconUpload, IconShare, IconStar, IconStarFilled, IconLink, IconSettings, IconCopy } from "@tabler/icons-vue";
+import { IconBox, IconBook, IconTool, IconFileText, IconSparkles2, IconUpload, IconShare, IconStar, IconStarFilled, IconLink, IconSettings, IconCopy } from "@tabler/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
-import tf, { getTfApiKey, isJinyuDreamProvider } from "@/lib/tf";
+import tf from "@/lib/tf";
 import { saveSettings } from "@/stores/settings";
-import JinyuDream from "@toonflow/providers/language/JinyuDream";
-import { invalidateNodeModels } from "@toonflow/nodes-scaffold/nodeAi";
 import saveFile from "@/lib/saveFile";
 import { writeClipboardText } from "@/lib/clipboard";
 import pluginConfigDialog from "./pluginConfigDialog.vue";
@@ -349,15 +333,24 @@ const selectedType = computed({
 });
 const installedPlugins = ref<Plugin[]>([]);
 const installedByKey = computed(() => new Map(installedPlugins.value.map((plugin) => [plugin.key, plugin])));
+/**
+ * 按「市场来源 identifier」再建一张表。市场的 identifier（`foodAestheticShortFilm`）与
+ * 技能自报的名字（`food-aesthetic-short-film`）常常对不上，只认名字就会把装好的插件显示成「安装」。
+ * NBSP 之类的不可见字符两边都要抹掉 —— 上游数据里真的混进了这种东西。
+ */
+function pluginKey(type: PluginType, identifier: string) {
+  return `${type}:${identifier.replace(/[\s\u00a0\u3000]/g, "")}`;
+}
+const installedByOrigin = computed(() => {
+  const map = new Map<string, Plugin>();
+  for (const plugin of installedPlugins.value) {
+    if (plugin.marketIdentifier) map.set(pluginKey(plugin.type, plugin.marketIdentifier), plugin);
+  }
+  return map;
+});
 const marketPlugins = ref<Plugin[]>([]);
 const marketLoading = ref(false);
 const marketError = ref("");
-const apiKey = computed(getTfApiKey);
-const marketNeedsKey = ref(false);
-const draftKey = ref("");
-const savingKey = ref(false);
-const keyError = ref("");
-let keyController: AbortController | undefined;
 const marketRefreshKey = ref(0);
 const loading = ref(false);
 const loadErrors = ref<Partial<Record<PluginType, string>>>({});
@@ -377,11 +370,6 @@ const refreshInstalled = () => {
 };
 onMounted(() => window.addEventListener("toonflow:plugin-installed", refreshInstalled));
 onBeforeUnmount(() => window.removeEventListener("toonflow:plugin-installed", refreshInstalled));
-onBeforeUnmount(() => keyController?.abort());
-watch(
-  () => [visible, activeTab.value],
-  () => keyController?.abort()
-);
 const selectedConfigPlugin = ref<Plugin>();
 const configVisible = ref(false);
 const selectedPlugin = ref<Plugin>();
@@ -411,11 +399,38 @@ const visiblePlugins = computed(() => {
   return installedPlugins.value.filter(
     (plugin) =>
       (selectedType.value === "all" || plugin.type === selectedType.value) &&
-      [plugin.name, plugin.displayName, plugin.author, plugin.description].some((value) =>
+      [displayIdentifier(plugin), plugin.displayName, plugin.author, plugin.description].some((value) =>
         value?.toLowerCase().includes(appliedQuery.value.toLowerCase())
       )
   );
 });
+
+/**
+ * 卡片上那行小字显示的是插件的 identifier。上游有几个插件把**自家品牌**写进了
+ * identifier（如 `toonflowLuxuryPawnRecoveryComicDrama`），原样显示等于把来源
+ * 暴露给终端用户 —— 这里**只在显示层**把 `toonflow` 前缀摘掉。
+ *
+ * ⚠️ 绝不能改 `plugin.name` 本身：安装 / 卸载 / 启停 / 导出 / 匹配已安装
+ * （`installedByKey.get(\`${type}:${name}\`)`）全靠它精确匹配，改了会装不上、
+ * 也认不出已装。所以只做"显示"这一件事，拿到的字符串不要回流进任何请求。
+ */
+function displayIdentifier(plugin: Plugin) {
+  return plugin.name.replace(/^toonflow[-_ ]?/i, "").trim() || plugin.name;
+}
+
+/**
+ * 显示层的品牌映射：把插件自带的 Toonflow 字样换成我们自己的。
+ *
+ * 这些字来自插件自己的元数据 —— 已安装列表里的 "Toonflow-Depth"、"面向 Toonflow 的…" 之类，
+ * 源头是本地 skills 目录下的 SKILL.md 与节点脚本里的 displayName，不是我们的文案。
+ * 文件躺在用户机器上，改文件又会被下次更新覆盖，所以只在显示层换。
+ *
+ * 只作用于 displayName / description / readme 这几个纯展示字段；
+ * 不要碰 name / identifier / fileName —— 安装、卸载、匹配已安装全靠它们，改了会装不上。
+ */
+function brandify(text: string | undefined) {
+  return typeof text === "string" ? text.replace(/toonflow/gi, "JinyuTV") : "";
+}
 
 function canViewPlugin(plugin: Plugin) {
   return activeTab.value === "installed" && (plugin.type === "skill" || (plugin.type === "agent" && plugin.kind === "local" && canManageAgents.value))
@@ -456,7 +471,7 @@ function hasMissingConfig(plugin: Plugin) {
 watch(activeTab, () => { marketPage.value = 1; });
 
 watch(
-  () => [visible, activeTab.value, selectedTypes.value.discover, marketPage.value, appliedQuery.value, marketRefreshKey.value, apiKey.value],
+  () => [visible, activeTab.value, selectedTypes.value.discover, marketPage.value, appliedQuery.value, marketRefreshKey.value],
   async (_value, _previous, onCleanup) => {
     if (!visible || !isMarketTab.value) return;
     const controller = new AbortController();
@@ -464,13 +479,6 @@ watch(
     marketLoading.value = true;
     marketError.value = "";
     marketPlugins.value = [];
-    marketNeedsKey.value = !apiKey.value;
-    if (marketNeedsKey.value) {
-      marketTotal.value = 0;
-      marketError.value = "填写 Linke API Key 后即可浏览插件市场";
-      marketLoading.value = false;
-      return;
-    }
     try {
       const pageData = await tf.getPlugIn(
         {
@@ -514,9 +522,9 @@ watch(
         isCollected: item.isCollected,
         type: item.type as PluginType,
         name: item.identifier.trim(),
-        displayName: item.name.trim() || item.identifier.trim(),
-        author: typeof item.supplier === "string" ? item.supplier : "",
-        description: typeof item.desc === "string" ? item.desc : "",
+        displayName: brandify(item.name.trim() || item.identifier.trim()),
+        author: brandify(typeof item.supplier === "string" ? item.supplier : ""),
+        description: brandify(typeof item.desc === "string" ? item.desc : ""),
         url: item.link,
         fileName: item.fileName.trim(),
         version: item.version,
@@ -524,10 +532,8 @@ watch(
     } catch (error) {
       if (!controller.signal.aborted) {
         marketTotal.value = 0;
+        // 凭据在服务端（中转持有），客户端这里不再区分"没填 key"和"登录失效" —— 一律当作暂时不可用。
         marketError.value = errorMessage(error, "加载插件市场失败，请重试");
-        marketNeedsKey.value =
-          marketError.value.includes("用户信息错误") || (axios.isAxiosError(error) && [401, 403].includes(error.response?.status ?? 0));
-        if (marketNeedsKey.value) marketError.value = "Linke 用户信息错误，请重新填写 API Key";
       }
     } finally {
       if (!controller.signal.aborted) marketLoading.value = false;
@@ -565,7 +571,9 @@ watch(
             ...item,
             type,
             key: `${type}:${item.name}`,
-            displayName: item.displayName || item.name,
+            displayName: brandify(item.displayName || item.name),
+            description: brandify(item.description),
+            author: brandify(item.author),
             configRules: markRaw(item.configRules ?? []),
           } as Plugin));
         } catch (error) {
@@ -581,56 +589,6 @@ watch(
   { immediate: true }
 );
 
-async function saveMarketKey() {
-  const key = draftKey.value
-    .trim()
-    .replace(/^Bearer(?:\s+|$)/i, "")
-    .trim();
-  if (savingKey.value) return;
-  if (!key) {
-    keyError.value = "请输入有效的 Linke API Key";
-    return;
-  }
-  const previousKey = apiKey.value;
-  const controller = new AbortController();
-  keyController = controller;
-  savingKey.value = true;
-  keyError.value = "";
-  try {
-    await tf.getPlugIn({ page: 1, limit: 1, type: "all" }, { apiKey: key, signal: controller.signal });
-    if (controller.signal.aborted) return;
-    await saveSettings((current) => {
-      if (controller.signal.aborted) return;
-      const providers = current.customProviders ?? [];
-      if (!Array.isArray(providers)) throw new Error("文本模型配置格式无效");
-      const index = providers.findIndex((item) => typeof item?.id === "string" && isJinyuDreamProvider(item));
-      if (index < 0 && providers.some((item) => typeof item?.id === "string" && item.id.toLowerCase() === JinyuDream.id.toLowerCase())) {
-        throw new Error("存在同名的非官方 Linke 供应商，请先在文本模型中修改其 ID");
-      }
-      const { id, label, version, apiUrl, protocol, models } = JinyuDream;
-      const configs = current.mediaProviderConfigs as Record<string, Record<string, unknown>> | undefined;
-      if (configs !== undefined && (!configs || typeof configs !== "object" || Array.isArray(configs))) throw new Error("媒体供应商配置格式无效");
-      const mediaConfig = configs?.JinyuDream;
-      if (mediaConfig !== undefined && (!mediaConfig || typeof mediaConfig !== "object" || Array.isArray(mediaConfig)))
-        throw new Error("Linke 媒体配置格式无效");
-      return {
-        customProviders:
-          index < 0
-            ? [...providers, { id, label, version, apiUrl, protocol, models, apiKey: key }]
-            : providers.map((item, position) => (position === index ? { ...item, apiKey: key } : item)),
-        mediaProviderConfigs: { ...configs, JinyuDream: { ...mediaConfig, apiKey: key } },
-      };
-    });
-    if (controller.signal.aborted) return;
-    invalidateNodeModels("media");
-    draftKey.value = "";
-    if (apiKey.value === previousKey) marketRefreshKey.value++;
-  } catch (error) {
-    if (!controller.signal.aborted) keyError.value = errorMessage(error, "验证或保存失败，请重试");
-  } finally {
-    savingKey.value = false;
-  }
-}
 
 function applySearch() {
   appliedQuery.value = searchQuery.value.trim();
@@ -660,7 +618,10 @@ function canEditPlugin(plugin: Plugin) {
 }
 
 function installLabel(plugin: Plugin) {
-  const installed = installedByKey.value.get(`${plugin.type}:${plugin.name}`);
+  // ⚠️ 别用 plugin.key —— 市场卡片的 key 是 `market:<id>`，这里是拿"名字/来源"去已安装表里取值。
+  const lookup = pluginKey(plugin.type, plugin.name);
+  // 先按名字精确认，认不到再按安装来源认 —— 市场 identifier 与技能真名不一致时靠后者兜住。
+  const installed = installedByKey.value.get(lookup) ?? installedByOrigin.value.get(lookup);
   if (!installed) return "安装";
   const [current, incoming] = [installed.version, plugin.version].map(value => {
     const version = parse(value ?? "");
@@ -673,17 +634,15 @@ function installLabel(plugin: Plugin) {
 
 async function toggleCollection(plugin: Plugin) {
   if (plugin.id === undefined || collectingPlugins.value.has(plugin.key)) return;
-  const key = apiKey.value;
   collectingPlugins.value.add(plugin.key);
   try {
-    const { collected } = await tf.toggleCollection(plugin.id, { apiKey: key });
-    if (apiKey.value !== key) return;
+    const { collected } = await tf.toggleCollection(plugin.id);
     const current = marketPlugins.value.find(item => item.id === plugin.id);
     if (current) current.isCollected = collected;
     if (selectedType.value === "collection" || marketLoading.value) marketRefreshKey.value++;
     ElMessage.success(collected ? "收藏成功" : "已取消收藏");
   } catch (error) {
-    if (apiKey.value === key) ElMessage.error(errorMessage(error, "修改收藏失败，请重试"));
+    ElMessage.error(errorMessage(error, "修改收藏失败，请重试"));
   } finally {
     collectingPlugins.value.delete(plugin.key);
   }
