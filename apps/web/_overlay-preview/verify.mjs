@@ -102,7 +102,10 @@ await stageLg.screenshot({ path: join(outDir, "_gen-motion-a.png") });
 await page.waitForTimeout(800);
 await stageLg.screenshot({ path: join(outDir, "_gen-motion-b.png") });
 
-// 对比度：文字藏掉，只量它背后的实际底色（不能拿文字像素跟周边比）
+// 对比度：藏掉**字形填色**但保留文字自带的深色描晕，量"字形边缘实际看到的底色"。
+//   · 不能拿文字像素去跟周边比（抗锯齿边缘＝假低对比）；
+//   · 也不该用 visibility:hidden —— 那会把 text-shadow 一起藏掉，
+//     而现在没有整幅暗罩了，可读性正是靠那圈描晕，藏了就等于漏掉保护。
 const boxes = {};
 for (const [key, idx] of [["sm", 0], ["md", 1], ["lg", 2]]) {
   // ⚠️ 不能用 .stage 这种类选择器：三个舞台都带 .stage，strict mode 会直接报歧义
@@ -110,7 +113,7 @@ for (const [key, idx] of [["sm", 0], ["md", 1], ["lg", 2]]) {
   const sBox = await stage.boundingBox();
   const pBox = await stage.locator(".genPercent").boundingBox();
   await page.evaluate(() => {
-    document.querySelectorAll(".genPercent, .genLabel").forEach((el) => { el.style.visibility = "hidden"; });
+    document.querySelectorAll(".genPercent, .genLabel").forEach((el) => { el.style.color = "transparent"; });
   });
   const file = join(outDir, `_gen-contrast-${key}.png`);
   await stage.screenshot({ path: file });
@@ -124,7 +127,7 @@ for (const [key, idx] of [["sm", 0], ["md", 1], ["lg", 2]]) {
     },
   };
   await page.evaluate(() => {
-    document.querySelectorAll(".genPercent, .genLabel").forEach((el) => { el.style.visibility = ""; });
+    document.querySelectorAll(".genPercent, .genLabel").forEach((el) => { el.style.color = ""; });
   });
 }
 

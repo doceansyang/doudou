@@ -57,9 +57,6 @@
           <span class="genGrid" />
           <span class="genSweep" />
         </template>
-
-        <!-- 文字底衬。放在丝带之上、文字之下 -->
-        <span class="genScrim" />
       </div>
 
       <div class="genBody">
@@ -173,22 +170,10 @@ onScopeDispose(() => {
   background: #0b0713;
 }
 
-/* 文字底下的一层暗罩。
-   ⚠️ 不是装饰：丝带最亮的地方正好在画面中部，也就是文字所在处。
-   不做这层罩子，白字压在亮紫丝带上对比度会掉到 4.5:1 以下（实测过）。
-   为什么是**整幅**的椭圆而不是贴着文字的小块：小块会在亮带中间抠出一个显眼的
-   黑洞，看着像没渲染好；整幅椭圆读起来是"暗角"，是刻意的。 */
-.genScrim {
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(
-    ellipse 78% 62% at 50% 50%,
-    rgb(9 6 18 / 58%) 0%,
-    rgb(9 6 18 / 30%) 52%,
-    rgb(9 6 18 / 0%) 100%
-  );
-  pointer-events: none;
-}
+/* ⚠️ 这里原来有一层 `.genScrim` 整幅椭圆暗罩（压暗中部 58%），用户明确要求去掉：
+   "动画上面感觉有个黑色遮罩" —— 罩子确实把丝带最亮的那一段压灰了。
+   去掉之后，文字可读性改由**文字自身的深色描晕**（text-shadow，见 .genPercent /
+   .genLabel）来保证：只在字形边缘几个像素内压暗，不影响整幅动画的观感。 */
 
 .genBlob {
   position: absolute;
@@ -267,8 +252,14 @@ onScopeDispose(() => {
   // 关键：数字宽度恒定，41% → 42% 时整个数字块不会左右抖动
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
-  // 小字号下不需要 26px 的大光晕（那是给 60px 数字准备的），改成贴着字的柔光
-  text-shadow: 0 1px 10px rgb(10 4 24 / 70%);
+  // 深色描晕：整幅暗罩去掉后，靠它来保可读性。
+  // 三层叠成「边缘紧、外圈柔」的晕，只在字形周围几像素内压暗 ——
+  // 观感上是"字有厚度"，不是"画面被蒙了一层黑"。
+  text-shadow:
+    0 0 2px rgb(6 3 14 / 96%),
+    0 0 4px rgb(6 3 14 / 92%),
+    0 0 8px rgb(6 3 14 / 88%),
+    0 1px 16px rgb(6 3 14 / 62%);
 }
 
 .genUnit {
@@ -286,7 +277,9 @@ onScopeDispose(() => {
   overflow: visible;
   // 内描边：小尺寸下轨道本身很细，靠这一圈让"还有多少没走完"看得清
   background: rgb(255 255 255 / 14%);
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 8%);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 8%),
+    0 0 7px rgb(6 3 14 / 72%);   // 轨道外侧的深色描晕，理由同文字
   border-radius: 999px;
 }
 
@@ -308,7 +301,12 @@ onScopeDispose(() => {
   line-height: 1.5;
   color: rgb(255 255 255 / 76%);
   letter-spacing: 0.02em;
-  text-shadow: 0 1px 8px rgb(10 4 24 / 70%);
+  // 同 .genPercent 的描晕（文案本身只有 76% 不透明度，所以晕要更实一点）
+  text-shadow:
+    0 0 2px rgb(6 3 14 / 96%),
+    0 0 4px rgb(6 3 14 / 94%),
+    0 0 8px rgb(6 3 14 / 90%),
+    0 1px 14px rgb(6 3 14 / 66%);
 }
 
 /* 淡入淡出：出场稍慢一点，让"完成"有一拍喘息 */
