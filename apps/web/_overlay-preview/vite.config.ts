@@ -20,7 +20,8 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     cssCodeSplit: false,
-    lib: { entry: fileURLToPath(new URL("./main.ts", import.meta.url)), name: "GenOverlayPreview", formats: ["iife"], fileName: () => "preview.js" },
+    // 允许换入口：调参数时用 variants.ts 铺一版对照栅格，交付验证仍走 main.ts
+    lib: { entry: fileURLToPath(new URL(process.env.OVERLAY_ENTRY || "./main.ts", import.meta.url)), name: "GenOverlayPreview", formats: ["iife"], fileName: () => "preview.js" },
     rollupOptions: { output: { assetFileNames: "preview.[ext]" } },
   },
 });

@@ -13,9 +13,10 @@
   99 卡死之后假装到 100 —— 只有 `active` 变 false（真的拿到结果）才收口到 100。
   这一点很重要：**宁可停在 99 也不要撒谎**，用户看到 100% 却不出片会失去信任。
 
-  视觉只用了 CSS 的位移动画（渐变 + transform），没有用 `filter: blur()`
-  铺大面积 —— 本机是 Pentium Gold + WebView2，大范围模糊会明显掉帧。
-  径向渐变本身就是柔和的，不需要模糊滤镜。
+  背景是一层 **WebGL 流体丝带**（`strandsBackdrop.vue`，见该文件的说明）；
+  WebGL 不可用时回退到纯 CSS 的光斑 + 网格 + 扫光，静态但不会是白板。
+  CSS 那一组刻意没有用 `filter: blur()` 铺大面积 —— 本机是 Pentium Gold +
+  WebView2，大范围模糊会明显掉帧，径向渐变本身就够柔。
 -->
 <template>
   <transition name="genFade">
@@ -29,10 +30,36 @@
       :aria-label="label"
     >
       <div class="genBackdrop" aria-hidden="true">
-        <span class="genBlob genBlob--a" />
-        <span class="genBlob genBlob--b" />
-        <span class="genGrid" />
-        <span class="genSweep" />
+        <!-- 主背景：WebGL 流体丝带（Strands）。拿不到 WebGL 时下面的 CSS 层顶上 -->
+        <!--
+          参数是**肉眼对比调出来的**（`_overlay-preview/variants.ts` 的对照栅格，
+          看 scripts/_out/_strands-variants.png）：
+          · 原版振幅只有 ~0.11，丝带全挤在中线上糊成一条亮带，像飞碟；
+          · 振幅 2.4 会周期性地撑成大菱形，画面忽大忽小；
+          · 定在 1.3 —— 三个相位下都稳定，丝带之间留得住缝隙、又不糊成一条。
+          ⚠️ 调这组参数**必须看多个相位**：栅格第一版每个参数只截一帧，
+            同一组参数换个时刻就从"蝠鲼"变"蝴蝶"，只截一帧的结论是假的。
+        -->
+        <strandsBackdrop
+          :colors="strandColors"
+          :count="3"
+          :amplitude="1.3"
+          :thickness="0.7"
+          :intensity="0.4"
+          :glow="2.0"
+          :opacity="0.92"
+          :animated="!reduceMotion"
+          @available="strandsReady = $event"
+        />
+        <template v-if="!strandsReady">
+          <span class="genBlob genBlob--a" />
+          <span class="genBlob genBlob--b" />
+          <span class="genGrid" />
+          <span class="genSweep" />
+        </template>
+
+        <!-- 文字底衬。放在丝带之上、文字之下 -->
+        <span class="genScrim" />
       </div>
 
       <div class="genBody">
@@ -50,6 +77,7 @@
 
 <script setup lang="ts">
 import { onScopeDispose, ref, watch } from "vue";
+import strandsBackdrop from "./strandsBackdrop.vue";
 
 const props = withDefaults(defineProps<{
   /** 是否正在生成。变 true 开始爬升，变 false 收口到 100% 并淡出。 */
@@ -68,6 +96,17 @@ const props = withDefaults(defineProps<{
 
 const mounted = ref(false);
 const shown = ref(0);
+
+/**
+ * 背景丝带的配色 —— 取品牌紫→品红，第三个色回到蓝紫做过渡，
+ * 让色相环插值始终落在品牌区间里（不像原版默认那样跑到红/黄/青上去）。
+ */
+const strandColors = ["#7c3aed", "#ff9ffc", "#4c1dff"];
+/** WebGL 是否可用。false 时回退到纯 CSS 的静态渐变背景。 */
+const strandsReady = ref(false);
+const reduceMotion = typeof window !== "undefined"
+  && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 let raf = 0;
 let startedAt = 0;
 let holdTimer: ReturnType<typeof setTimeout> | undefined;
@@ -126,12 +165,29 @@ onScopeDispose(() => {
 }
 
 /* ── 会动的背景 ──────────────────────────────────────────────
-   底色压到近黑（#0b0713），只让两个品牌色光斑在上面漂 —— 这样白色文字
-   在任何主题下都能保持 ≥ 7:1 对比度（实测本机截图取样）。 */
+   底色压到近黑（#0b0713），上面跑 WebGL 流体丝带（Strands）。
+   WebGL 拿不到时，退回下面那一组纯 CSS 光斑 —— 静态但不会是白板。 */
 .genBackdrop {
   position: absolute;
   inset: 0;
   background: #0b0713;
+}
+
+/* 文字底下的一层暗罩。
+   ⚠️ 不是装饰：丝带最亮的地方正好在画面中部，也就是文字所在处。
+   不做这层罩子，白字压在亮紫丝带上对比度会掉到 4.5:1 以下（实测过）。
+   为什么是**整幅**的椭圆而不是贴着文字的小块：小块会在亮带中间抠出一个显眼的
+   黑洞，看着像没渲染好；整幅椭圆读起来是"暗角"，是刻意的。 */
+.genScrim {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    ellipse 78% 62% at 50% 50%,
+    rgb(9 6 18 / 58%) 0%,
+    rgb(9 6 18 / 30%) 52%,
+    rgb(9 6 18 / 0%) 100%
+  );
+  pointer-events: none;
 }
 
 .genBlob {
@@ -184,6 +240,8 @@ onScopeDispose(() => {
 
 .genBody {
   position: relative;
+  // 自成层叠上下文：里面的 .genVeil 用 z-index:-1 时才会压在丝带之上、文字之下
+  z-index: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -192,32 +250,37 @@ onScopeDispose(() => {
   color: #fff;
 }
 
+/* 字号**
+   用户要求"小一点，10 号字就行" —— 10 号 = 10pt ≈ 13px。
+   原来是 clamp(24px, 20cqmin, 60px)，大字占掉整个画面，现在收成小号信息条。
+   仍然按容器缩放（cqmin），但区间压缩到 12–14px，大小节点看着都一致。 */
 .genPercent {
   display: flex;
   align-items: baseline;
   gap: 1px;
   margin: 0;
-  font-size: 34px;                                   // 兜底（不支持容器查询时）
-  font-size: clamp(24px, 20cqmin, 60px);
+  font-size: 13px;                                   // 兜底（不支持容器查询时）
+  font-size: clamp(12px, 4.2cqmin, 14px);
   font-weight: 600;
   line-height: 1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
   // 关键：数字宽度恒定，41% → 42% 时整个数字块不会左右抖动
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
-  text-shadow: 0 2px 26px rgb(88 40 255 / 60%);
+  // 小字号下不需要 26px 的大光晕（那是给 60px 数字准备的），改成贴着字的柔光
+  text-shadow: 0 1px 10px rgb(10 4 24 / 70%);
 }
 
 .genUnit {
-  font-size: 0.44em;
+  font-size: 0.72em;
   font-weight: 500;
   opacity: 0.7;
 }
 
 .genTrack {
-  width: min(64%, 240px);
+  width: min(54%, 170px);
   height: 3px;
-  margin-top: 14px;
+  margin-top: 9px;
   // ⚠️ 这里**不能**用 overflow:hidden：轨道只有 3px 高，会把填充那圈前缘辉光
   //    垂直方向整个裁掉，等于白加。填充自己带了圆角，不需要轨道来裁。
   overflow: visible;
@@ -240,11 +303,12 @@ onScopeDispose(() => {
 }
 
 .genLabel {
-  margin: 10px 0 0;
-  font-size: 12.5px;
+  margin: 7px 0 0;
+  font-size: 10.5px;
   line-height: 1.5;
-  color: rgb(255 255 255 / 74%);
+  color: rgb(255 255 255 / 76%);
   letter-spacing: 0.02em;
+  text-shadow: 0 1px 8px rgb(10 4 24 / 70%);
 }
 
 /* 淡入淡出：出场稍慢一点，让"完成"有一拍喘息 */
