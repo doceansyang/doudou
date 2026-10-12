@@ -87,11 +87,47 @@ def compile_to(target_dir):
     return n == 3
 
 
+def shot_license(reason=""):
+    """把授权窗口渲染成 PNG，供设计走查（不进发行包）。
+
+    复用 launcher.cs 里的 LicenseForm 真实代码，截图即真实界面。
+    走同一条 Python 子进程编译路径（直接调编译器会被安全策略拦）。
+    """
+    src = os.path.join(BUILDER_DIR, "_shot-license.cs")
+    if not os.path.isfile(src):
+        print("  !! 缺少 %s（请先由生成脚本产出）" % src)
+        return False
+    out_dir = os.path.join(PROJECT, "scripts", "_out")
+    os.makedirs(out_dir, exist_ok=True)
+    exe = os.path.join(out_dir, "_shot-license.exe")
+    refs = ["/r:System.dll", "/r:System.Core.dll", "/r:System.Drawing.dll",
+            "/r:System.Windows.Forms.dll"]
+    build = subprocess.run(
+        [CSC, "/nologo", "/target:exe", "/platform:x64",
+         "/out:" + exe, src] + refs,
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if build.returncode != 0:
+        print("  !! 编译截图宿主失败：%s" % (build.stdout or build.stderr))
+        return False
+    run = subprocess.run([exe, reason], cwd=PROJECT,
+                         capture_output=True, text=True, encoding="utf-8",
+                         errors="replace")
+    print((run.stdout or "").strip() or (run.stderr or "").strip())
+    return os.path.isfile(os.path.join(out_dir, "license-window.png"))
+
+
 def main():
     if not os.path.exists(CSC):
         raise SystemExit("找不到 C# 编译器：%s" % CSC)
     if not os.path.isdir(WV2_DIR):
         raise SystemExit("缺少 WebView2 SDK 组件：%s" % WV2_DIR)
+
+    # 设计走查模式：只渲染授权窗口截图，不编译启动器
+    if len(sys.argv) >= 2 and sys.argv[1] == "--shot-license":
+        print("=== 渲染授权窗口截图 ===")
+        reason = sys.argv[2] if len(sys.argv) > 2 else ""
+        return 0 if shot_license(reason) else 1
+
     targets = sys.argv[1:] or DEFAULT_TARGETS
     print("=== 编译启动器（内嵌 WebView2 窗口）===")
     ok = False

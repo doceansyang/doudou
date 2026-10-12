@@ -312,8 +312,13 @@ class JinyuTVLauncher
         Color accent = HexToColor(ReadPrimaryColor());      // 用户设置里的主色（默认近黑 #171717）
         Color accentSolid = AccentFor(accent, bg);           // 主色提亮到「看得见」的版本
         Color onAccent = ReadableOn(accentSolid);            // 按钮上的可读文字
+        // logo 用**反相**：主色是近黑，直接当块底就是一团黑、看不见" J"。
+        // 所以 logo 取「亮底 + 深字」，与按钮（亮底白字）视觉呼应又不靠色相区分层级。
+        Color logoBg = Color.FromArgb(0xE8, 0xE8, 0xEC);
+        Color logoFg = Color.FromArgb(0x1B, 0x1B, 0x1F);
         Color surface = Color.FromArgb(0x21, 0x21, 0x26);    // 卡片面：比底色略亮
-        Color surfaceHi = Color.FromArgb(0x2B, 0x2B, 0x32);  // 按钮/输入面
+        Color surfaceHi = Color.FromArgb(0x2B, 0x2B, 0x32);  // 次级按钮面
+        Color inputBg = Color.FromArgb(0x14, 0x15, 0x19);    // 输入区底：比外壳略浅，形成凹陷感
         Color border = Color.FromArgb(0x3A, 0x3A, 0x44);
         Color textHi = Color.FromArgb(0xEC, 0xEC, 0xF0);
         Color textMid = Color.FromArgb(0x9A, 0x9A, 0xA6);
@@ -336,12 +341,12 @@ class JinyuTVLauncher
             var logo = new Panel
             {
                 Bounds = new Rectangle(32, 28, 52, 52),
-                BackColor = accentSolid,
+                BackColor = logoBg,
             };
             var logoMark = new Label
             {
                 Text = "J",
-                ForeColor = onAccent,
+                ForeColor = logoFg,
                 Font = new Font("Microsoft YaHei UI", 24F, FontStyle.Bold),
                 TextAlign = ContentAlignment.MiddleCenter,
                 Dock = DockStyle.Fill,
@@ -465,10 +470,12 @@ class JinyuTVLauncher
                 TextAlign = ContentAlignment.MiddleRight,
             };
 
+            // 输入区要能从卡片面上"浮"出来：比 surface 再亮一档，
+            // 否则输入框与卡片同色（都是 33,33,38），边界完全看不出来。
             _input = new TextBox
             {
                 Bounds = new Rectangle(32, 290, 496, 92),
-                BackColor = bg,
+                BackColor = inputBg,
                 ForeColor = textHi,
                 Font = new Font("Consolas", 9F),
                 BorderStyle = BorderStyle.None,

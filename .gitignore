@@ -63,3 +63,7 @@ scripts/license/private*
 
 # 本机授权文件（每台机器自己激活后生成，不该进仓库）
 /data/license.json
+
+# 截图宿主的临时产物
+scripts/_shot-license.cs
+scripts/_out/_shot-license.exe
