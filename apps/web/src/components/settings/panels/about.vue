@@ -28,9 +28,9 @@
             单一来源还意味着**没有任何配置可错** —— 所以不再需要下拉框，
             改成一个只说明「更新从哪来」的静态标签。
           -->
-          <span class="updateSourceTag" aria-label="更新源：JinyuTV 官方 GitHub 仓库">
-            <icon-brand-github :size="14" aria-hidden="true" />
-            JinyuTV 官方仓库
+          <span class="updateSourceTag" aria-label="更新源：JinyuTV 官方更新服务">
+            <icon-cloud-download :size="14" aria-hidden="true" />
+            JinyuTV 官方更新服务
           </span>
           <el-badge isDot :hidden="!hasDesktopUpdate">
             <el-button size="small" type="primary" plain :loading="checking" :disabled="working" @click="openUpdate">
@@ -196,7 +196,7 @@ import axios from "axios";
 import { ElMessage } from "element-plus";
 import {
   IconRefresh,
-  IconBrandGithub,
+  IconCloudDownload,
   IconExternalLink,
   IconAlertCircle,
   IconArrowUpCircle,

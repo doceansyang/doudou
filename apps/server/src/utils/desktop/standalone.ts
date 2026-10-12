@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DesktopRuntime } from "@/types/desktop";
 
-/** 版本清单文件名。放在 Release 资产里，固定路径 …/releases/latest/download/latest.json */
+/** 版本清单文件名。由 baseUrl（自有托管 https://linke.link/jinyutv-update/）拼出 latest.json */
 const MANIFEST_FILE = "latest.json";
 /** 清单请求超时：网络不通时要快速失败，而不是把「检查更新」卡住 */
 const CHECK_TIMEOUT_MS = 15000;

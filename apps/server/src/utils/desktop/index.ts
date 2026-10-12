@@ -5,16 +5,15 @@ import conf from "@/utils/conf";
 import { resolveDesktopRuntime } from "@/lib/desktop";
 import type { DesktopRuntime, desktopUpdateAttempt, updateSnapshot } from "@/types/desktop";
 
-const RELEASE_BASE = "https://github.com/doceansyang/doudou/releases/latest/download";
+const RELEASE_BASE = "https://linke.link/jinyutv-update";
 /**
- * 更新源（唯一）：JinyuTV 自己的 GitHub Releases。
+ * 更新源（唯一）：自己服务器上的静态托管（nginx 吐文件，见 scripts/_deploy-update-host.py）。
  *
- * 为什么不再保留上游的「官方源」：那是 Toonflow 后端的
- * （原为 `api.toonflow.net/web/version/desktopUpdates`，品牌替换时被脚本一并改写到了
- * api.linke.link），返回的是**他们自己产品**的版本，
- * 对我们来说是错的 —— 会提示用户「更新到别人的版本」。
- * 清单固定叫 latest.json：`…/releases/latest/download/latest.json`
- * 永远解析到最新一次发布的资产，所以**发新版本不需要改客户端任何地址**。
+ * 为什么不用 GitHub Releases 直连：软件进程里的 bun fetch **不走系统代理**，而国内
+ * 直连 github.com 普遍超时 —— 2026-10-13 实测「检查更新」永远卡到 15s 超时
+ * （终端里 curl 能通是因为终端挂了代理，软件进程没有）。托管目录里的文件由
+ * release.py 发版时经 sftp 上传，GitHub Releases 仍照常发布，但只作存档用。
+ * 清单固定叫 latest.json，**发新版本不需要改客户端任何地址**。
  */
 const updateBaseUrls = {
   github: RELEASE_BASE,
@@ -70,7 +69,7 @@ function getInstallFailure(local: Awaited<ReturnType<DesktopRuntime["updater"]["
     currentVersion: local.version,
     currentHash: local.hash,
     message,
-    downloadUrl: "https://github.com/HBAI-Ltd/Toonflow-app/releases/latest",
+    downloadUrl: "https://linke.link/jinyutv-update/",
   };
 }
 

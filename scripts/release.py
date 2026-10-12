@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""发版：升版本 → 构建安装包 → 生成更新清单 → 建 GitHub Release → 推送源码。
+"""发版：升版本 → 构建安装包 → 生成更新清单 → 建 GitHub Release → 上传自有托管 → 推送源码。
 
 一条命令（在项目里执行）：
     python toonflow/scripts/release.py                  # 用 package.json 里的当前版本发布
@@ -9,14 +9,12 @@
 
 约定（客户端的「检查更新」依赖这些，改之前先看 services 是怎么读的）：
   · **版本号唯一来源**：仓库根 `package.json` 的 `version`。本脚本只改这一处。
-  · **GitHub Release 标签**：`vX.Y.Z`
+  · **GitHub Release 标签**：`vX.Y.Z`（存档用）
   · **资产**：`JinyuTV-X.Y.Z-Setup.exe` + `latest.json`
-  · `latest.json` 的固定地址是 `…/releases/latest/download/latest.json`
-    —— 服务端的更新检查就拉这个地址（见 apps/server/src/utils/desktop/standalone.ts），
-    所以**发新版本不需要改客户端里的任何地址**。
-
-为什么用 gh 而不是 git 的凭据助手：本机没装 .NET，git 自带的凭据管理器起不来
-（详见用户级记忆），gh 走设备码授权，可用。
+  · **客户端真正的更新源**是自有托管 `https://linke.link/jinyutv-update/`
+    （nginx 静态吐文件，见 _deploy-update-host.py）—— GitHub 直连在国内超时
+    （软件进程的 bun fetch 不走系统代理），所以发版后必须把两个资产 sftp 上传过去。
+    `downloadUrl` 也写成自有托管直链，「一键下载安装包」同样不走 GitHub。
 """
 import argparse
 import datetime
@@ -34,6 +32,10 @@ PKG = os.path.join(PROJECT, "package.json")
 REPO = "doceansyang/doudou"
 TAG_PREFIX = "v"
 CHANNEL = "stable"
+# 客户端真正的更新源（nginx 静态托管，见 _deploy-update-host.py）：
+# latest.json 与安装包都发两份 —— GitHub 作存档，这里作「检查更新 / 一键下载」的实际来源。
+UPDATE_HOST_BASE = "https://linke.link/jinyutv-update"
+UPDATE_HOST_DIR = "/var/www/jinyutv-update"
 
 GH = os.environ.get("GH_CLI") or (
     r"C:/Users/JinYuDream/.workbuddy/tools/gh/gh.exe"
@@ -115,7 +117,8 @@ def main():
     tag = TAG_PREFIX + version
     setup = os.path.join(BASE, "JinyuTV-%s-Setup.exe" % version)
     manifest = os.path.join(BASE, "latest.json")
-    download_url = "https://github.com/%s/releases/download/%s/JinyuTV-%s-Setup.exe" % (REPO, tag, version)
+    # downloadUrl 写自有托管：客户端「一键下载安装包」不能指 GitHub（国内超时）。
+    download_url = "%s/JinyuTV-%s-Setup.exe" % (UPDATE_HOST_BASE, version)
 
     notes = args.notes or ""
     if args.notes_file:
@@ -180,7 +183,7 @@ def main():
     else:
         print("--- 已跳过源码推送（--no-push）")
 
-    # 5) 建 Release 并上传资产
+    # 5) 建 Release 并上传资产（存档；客户端实际走自有托管）
     print("--- 创建 GitHub Release %s" % tag)
     exists = run([GH, "release", "view", tag, "--repo", REPO], capture=True, check=False)
     if exists:
@@ -190,10 +193,44 @@ def main():
         run([GH, "release", "create", tag, setup, manifest,
              "--repo", REPO, "--title", "JinyuTV %s" % version, "--notes", notes, "--latest"])
 
+    # 6) 上传到自有托管（客户端「检查更新 / 一键下载」的真正来源，见文件头说明）
+    print("--- 上传更新托管 %s/" % UPDATE_HOST_BASE)
+    sys.path.insert(0, SCRIPTS)
+    from _server import connect  # noqa: E402  （凭据不进仓库）
+    cli = connect()
+    try:
+        sftp = cli.open_sftp()
+        try:
+            cli.exec_command("mkdir -p %s" % UPDATE_HOST_DIR, timeout=30)[1].channel.recv_exit_status()
+            for local_path in (manifest, setup):
+                remote_path = "%s/%s" % (UPDATE_HOST_DIR, os.path.basename(local_path))
+                try:
+                    remote_size = sftp.stat(remote_path).st_size
+                except FileNotFoundError:
+                    remote_size = -1
+                local_size = os.path.getsize(local_path)
+                if remote_size == local_size:
+                    print("    %s 已在服务器且大小一致，跳过" % os.path.basename(local_path))
+                    continue
+                print("    上传 %s（%.1f MB）…" % (os.path.basename(local_path), local_size / 1048576))
+                sftp.put(local_path, remote_path)
+            cli.exec_command("chmod 644 %s/*" % UPDATE_HOST_DIR, timeout=30)[1].channel.recv_exit_status()
+        finally:
+            sftp.close()
+        # 用服务器自己 curl 一下验证公网可达（服务器连自己的公网域名走本机 nginx）
+        _, out, _ = cli.exec_command(
+            "curl -sS --max-time 20 -o /dev/null -w '%%{http_code}' %s/latest.json" % UPDATE_HOST_BASE,
+            timeout=60)
+        code = out.read().decode().strip()
+        print("    公网 latest.json：HTTP %s" % ("200 ✓" if code == "200" else code + " ✗（请检查 _deploy-update-host.py）"))
+    finally:
+        cli.close()
+
     print()
     print("===== 完成 =====")
-    print("  发布页    : https://github.com/%s/releases/tag/%s" % (REPO, tag))
-    print("  更新清单  : https://github.com/%s/releases/latest/download/latest.json" % REPO)
+    print("  发布页    : https://github.com/%s/releases/tag/%s（存档）" % (REPO, tag))
+    print("  更新清单  : %s/latest.json（客户端实际拉这里）" % UPDATE_HOST_BASE)
+    print("  下载直链  : %s" % download_url)
     print("  已装旧版的用户点「检查更新」即可看到 %s" % version)
     return 0
 
