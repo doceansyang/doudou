@@ -1,6 +1,6 @@
 <template>
   <el-dialog v-model="visible" title="设置" width="min(1080px, calc(100vw - 32px))" alignCenter appendToBody>
-    <div class="settings">
+    <div class="settings" @click.capture="onSettingsClick">
       <aside class="sidebar" aria-label="设置分类">
         <template v-for="item in settingsPanels" :key="item.id">
           <h3 v-if="item.groupLabel" class="settingsGroupLabel">{{ item.groupLabel }}</h3>
@@ -29,7 +29,7 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, shallowRef } from "vue";
+import { defineAsyncComponent, onMounted, shallowRef } from "vue";
 import { hasDesktopUpdate } from "@/stores/desktopUpdate";
 import {
   IconPalette,
@@ -70,6 +70,46 @@ const settingsPanels = [
 ];
 const activePanel = shallowRef(settingsPanels[0]!);
 const visible = defineModel<boolean>({ default: false });
+
+/**
+ * 从「设置里点的外链」返回软件时，把设置面板恢复回来。
+ *
+ * 背景：点「查看余额」「前往 Linke 官网」这类外链，启动器会把 WebView **原地导航**
+ * 到外部网页并显示「外部网页」返回条（见 launcher.cs 的 UpdateNavBar/GoBackToApp）。
+ * 返回时它只 `Navigate(_lastAppUrl)` —— 也就是「软件内的地址」；而设置弹窗是 SPA
+ * 内存里的状态（不在 URL 里），所以回来必然停在首页/画布、弹窗和页签全没了。
+ *
+ * 做法：在**点外链的那一刻**落一份标记（含当前页签 + 时间），回到软件后自动恢复，
+ * 用完即删。用 localStorage 而不是 sessionStorage，是因为它跨"导航到外部域再返回"
+ * 一定还在；再加 2 分钟有效期，避免"点了外链但没回来"时下次启动莫名弹出设置。
+ */
+const RESTORE_KEY = "toonflow:settings-restore";
+const RESTORE_TTL = 2 * 60 * 1000;
+
+function onSettingsClick(event: MouseEvent) {
+  const anchor = (event.target as HTMLElement | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+  if (!anchor) return;
+  const href = anchor.getAttribute("href") ?? "";
+  // 只记真正会离开软件的外链：http(s) 且不是本机服务地址
+  // （本机地址只会在软件内跳转，不会触发返回条）
+  if (!/^https?:\/\//i.test(href) || /^https?:\/\/(localhost|127\.0\.0\.1)[:/]/i.test(href)) return;
+  try {
+    localStorage.setItem(RESTORE_KEY, JSON.stringify({ panel: activePanel.value.id, at: Date.now() }));
+  } catch { /* 存储不可用（隐私模式等）就算了，不影响主流程 */ }
+}
+
+onMounted(() => {
+  let saved: { panel?: unknown; at?: unknown } | null = null;
+  try {
+    const raw = localStorage.getItem(RESTORE_KEY);
+    localStorage.removeItem(RESTORE_KEY);   // 一次性：无论是否有效都清掉
+    saved = raw ? JSON.parse(raw) : null;
+  } catch { saved = null; }
+  if (!saved || typeof saved.at !== "number" || Date.now() - saved.at > RESTORE_TTL) return;
+  const panel = settingsPanels.find(item => item.id === saved!.panel);
+  if (panel) activePanel.value = panel;
+  visible.value = true;
+});
 </script>
 
 <style lang="scss" scoped>
