@@ -109,6 +109,7 @@ import route106 from "./routes/workspaces/files/write";
 import route107 from "./routes/workspaces/list";
 import route108 from "./routes/workspaces/selectDirectory";
 import route109 from "./routes/linke";
+import route110 from "./routes/modelSource";
 
 export default (app: Express) => {
   app.use("/api/agent", route1);
@@ -221,4 +222,7 @@ export default (app: Express) => {
   app.use("/api/workspaces/selectDirectory", route108);
   // 账户余额：linke 只认**网页登录的用户令牌**（sk key 读不到），凭据由启动器注入脚本回传。
   app.use("/api/linke", route109);
+  // 同源「模型源」代理：画布节点在页面里直连 ModelScope / hf-mirror 会被 CORS 拦（Failed to fetch），
+  // 改走本机服务端即可。详见 routes/modelSource.ts 顶部说明。
+  app.use("/api/modelSource", route110);
 }

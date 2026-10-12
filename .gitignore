@@ -81,6 +81,7 @@ scripts/launcher.cs.bak-*
 /scripts/_deploy-forwarder-fix.py
 /scripts/_deploy-path-prefix.py
 /scripts/_deploy-token.py
+/scripts/_deploy-update-host.py
 /scripts/_server.py
 
 # 本地构建与探针产物
