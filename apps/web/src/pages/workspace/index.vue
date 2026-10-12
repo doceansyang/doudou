@@ -39,7 +39,9 @@
         :aria-expanded="agentVisible"
         aria-label="JinyuTV Agent"
         aria-controls="agentPanel"
-        @click="agentVisible = !agentVisible"></el-button>
+        @click="agentVisible = !agentVisible">
+        <img class="agentLogo" :src="logoUrl" alt="" />
+      </el-button>
     </el-tooltip>
     <floatingAgent v-model="agentVisible" @resize="agentWidth = $event" />
     <settings v-model="settingsVisible" />
@@ -55,6 +57,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import settings from "@/components/settings/index.vue";
 import { useWorkspaceStore } from "@/stores/workspace";
 import { registerWorkspaceControl, waitForControlValue } from "@/lib/mcpControl";
+import logoUrl from "@toonflow/assets/logo.png";
 import anonymousData from "@/lib/anonymousData";
 import canvasPanel from "./panels/canvas/canvasHost.vue";
 import type { DocumentNodeOptions } from "./panels/canvas/canvasFiles";
@@ -291,43 +294,17 @@ function saveDocumentNode(directory: string, canvasPath: string, nodeId: string,
     padding: 0;
     border: 1px solid var(--el-border-color-light);
     border-radius: 50%;
-    background: linear-gradient(145deg, var(--el-fill-color-light), var(--el-bg-color-overlay));
-    color: #f4fffe;
+    // 原来这里是一个 CSS 画的"星球"（两层 radial-gradient + 10s 旋转）——
+    // 换成真实品牌 logo。logo 本身就是一张**圆盘**（实测不透明像素 78.3% ≈ π/4，
+    // 正好一个圆，四角透明），所以按钮只需要当它的底托：铺满、别再叠壳。
+    background: transparent;
     overflow: hidden;
-    isolation: isolate;
-    transition: transform 180ms ease;
-
-    &::before,
-    &::after {
-      content: "";
-      position: absolute;
-      inset: 5px;
-      border-radius: 50%;
-      pointer-events: none;
-    }
-
-    &::before {
-      z-index: -2;
-      background: radial-gradient(ellipse at 22% 15%, #a5fff0, transparent 55%), radial-gradient(ellipse at 85% 85%, #a999ff, transparent 60%),
-        radial-gradient(ellipse at 85% 20%, #1dd6cb, transparent 55%), linear-gradient(150deg, #12b8c9, #2765ba 65%, #5a5cc4);
-      animation: agentFlow 10s linear infinite;
-      filter: saturate(0.85);
-      transition: filter 180ms ease;
-    }
-
-    &::after {
-      z-index: -1;
-      background: radial-gradient(ellipse at 30% 12%, #ffffff80, transparent 48%), radial-gradient(ellipse at 65% 95%, #17246070, transparent 65%);
-      box-shadow: inset 0 1px 2px #ffffff80, inset 0 -2px 4px #14255460;
-    }
-
-    &.active::before,
-    &:hover::before {
-      filter: saturate(1.15);
-    }
+    transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
 
     &:hover {
       transform: translateY(-1px);
+      border-color: var(--el-border-color);
+      box-shadow: 0 6px 18px rgb(0 0 0 / 28%);
     }
 
     &:active {
@@ -340,28 +317,14 @@ function saveDocumentNode(directory: string, canvasPath: string, nodeId: string,
     }
 
     .agentLogo {
-      width: 24px;
-      height: 24px;
-      flex-shrink: 0;
-      background: currentColor;
-      mask-size: contain;
-      mask-position: center;
-      mask-repeat: no-repeat;
+      display: block;
+      width: 100%;
+      height: 100%;
+      // 方形画布上的圆盘 → contain，保证整圆都在按钮内、不被裁边
+      object-fit: contain;
+      pointer-events: none;
+      user-select: none;
     }
-
-    @media (prefers-reduced-motion: reduce) {
-      transition: none;
-
-      &::before {
-        animation: none;
-      }
-    }
-  }
-}
-
-@keyframes agentFlow {
-  to {
-    transform: rotate(360deg);
   }
 }
 </style>
