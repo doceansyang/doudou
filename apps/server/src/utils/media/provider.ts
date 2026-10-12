@@ -17,7 +17,14 @@ type ObjectExpression = Extract<Expression, { type: "ObjectExpression" }>;
 
 const providerTranspiler = new Bun.Transpiler({ loader: "ts", target: "bun", define: { require: "undefined" } });
 
-const providerIdSchema = z.string().max(96).regex(/^[a-z][a-zA-Z0-9]*$/)
+// ⚠️ 首字母**必须允许大写**：品牌化之后的官方供应商 id 就是 `JinyuDream`
+//    （见 packages/providers/src/media/JinyuDream.ts，文件名 JinyuDream.ts）。
+//    原来这里只允许小写开头（/^[a-z]…/），后果非常隐蔽 ——
+//    `listMediaProviders()` 是先 filter 文件名、再逐个读的：
+//    名字不合规的文件会被**整个丢掉**，既不报错也不出现在列表里，
+//    于是"文件明明躺在 data/providers 下、功能和模型却一个都出不来"。
+//    （踩坑记录：JinyuDream.ts 从 10-10 就躺在实例里，一直静默失效。）
+const providerIdSchema = z.string().max(96).regex(/^[a-zA-Z][a-zA-Z0-9]*$/)
   .refine(value => !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(value), "供应商 ID 不能是系统保留文件名");
 export const mediaProviderFileSchema = z.string().refine(value => value.endsWith(".ts") && providerIdSchema.safeParse(value.slice(0, -3)).success, "供应商文件名无效");
 export const mediaModelsSchema = z.array(z.object({

@@ -67,8 +67,11 @@ export type NodeAiTool = {
  * 未列出的供应商排在后面，且彼此仍保持服务端顺序（Array.sort 是稳定排序）。
  * 这个函数视频/图片/音频/文本节点共用，但 `doubaoAccount` 只声明了视频模型，
  * 所以在文字、图片列表里不会产生任何影响。
+ *
+ * 顺序按用户要求：**Linke（JinyuDream，官方中转平台）排第一**，豆包账号第二。
+ * 与「设置 → 媒体模型」列表一致 —— 那边 `sortedProviders` 也是把 JinyuDream 提到最前。
  */
-const PROVIDER_PRIORITY = ["doubaoAccount", "JinyuDream"];
+const PROVIDER_PRIORITY = ["JinyuDream", "doubaoAccount"];
 
 function providerRank(id: string) {
   const index = PROVIDER_PRIORITY.indexOf(id);
