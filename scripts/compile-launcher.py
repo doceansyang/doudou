@@ -34,6 +34,8 @@ WV2_FILES = [
 
 # 窗口图标（放软件根目录，launcher.cs 会按 logo.ico 优先加载）
 LOGO_SRC = os.path.join(PROJECT, "packages", "assets", "logo.ico")
+# 弹窗品牌 logo 用 PNG（带透明通道，WinForms 直接 GDI+ 绘制最干净）
+LOGO_PNG_SRC = os.path.join(PROJECT, "packages", "assets", "logo.png")
 
 CSC = os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
                    "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe")
@@ -66,6 +68,12 @@ def copy_wv2(target_dir):
             shutil.copy2(LOGO_SRC, os.path.join(target_dir, "logo.ico"))
         except OSError:
             pass
+    # logo.png 供授权弹窗品牌位显示（IconBox "logo" 优先读它）
+    if os.path.isfile(LOGO_PNG_SRC):
+        try:
+            shutil.copy2(LOGO_PNG_SRC, os.path.join(target_dir, "logo.png"))
+        except OSError:
+            pass
     return n
 
 
@@ -87,11 +95,13 @@ def compile_to(target_dir):
     return n == 3
 
 
-def shot_license(reason=""):
+def shot_license(reason="", prefill=""):
     """把授权窗口渲染成 PNG，供设计走查（不进发行包）。
 
     复用 launcher.cs 里的 LicenseForm 真实代码，截图即真实界面。
     走同一条 Python 子进程编译路径（直接调编译器会被安全策略拦）。
+    prefill：往产品密钥框里塞一段测试文本，用来验证"输入内容能显示"
+    （TextBox 一旦被设 UserPaint 就不再绘制文字，必须实测才能发现）。
     """
     src = os.path.join(BUILDER_DIR, "_shot-license.cs")
     if not os.path.isfile(src):
@@ -109,7 +119,19 @@ def shot_license(reason=""):
     if build.returncode != 0:
         print("  !! 编译截图宿主失败：%s" % (build.stdout or build.stderr))
         return False
-    run = subprocess.run([exe, reason], cwd=PROJECT,
+    # 截图宿主也要能显示真实 logo —— 从发行版目录把 logo 复制到 exe 旁边。
+    # 否则 IconBox 找不到图片会走"降级方块"分支，走查看到的就不是真实效果。
+    for name in ("logo.png", "logo.ico"):
+        for src_dir in (os.path.join(PROJECT, "packages", "assets"),
+                        DEFAULT_TARGETS[1]):
+            cand = os.path.join(src_dir, name)
+            if os.path.isfile(cand):
+                try:
+                    shutil.copy2(cand, os.path.join(out_dir, name))
+                except OSError:
+                    pass
+                break
+    run = subprocess.run([exe, reason, out_dir, prefill], cwd=PROJECT,
                          capture_output=True, text=True, encoding="utf-8",
                          errors="replace")
     print((run.stdout or "").strip() or (run.stderr or "").strip())
@@ -123,10 +145,12 @@ def main():
         raise SystemExit("缺少 WebView2 SDK 组件：%s" % WV2_DIR)
 
     # 设计走查模式：只渲染授权窗口截图，不编译启动器
+    # 用法：--shot-license [错误提示文本] [产品密钥预填文本]
     if len(sys.argv) >= 2 and sys.argv[1] == "--shot-license":
         print("=== 渲染授权窗口截图 ===")
         reason = sys.argv[2] if len(sys.argv) > 2 else ""
-        return 0 if shot_license(reason) else 1
+        prefill = sys.argv[3] if len(sys.argv) > 3 else ""
+        return 0 if shot_license(reason, prefill) else 1
 
     targets = sys.argv[1:] or DEFAULT_TARGETS
     print("=== 编译启动器（内嵌 WebView2 窗口）===")

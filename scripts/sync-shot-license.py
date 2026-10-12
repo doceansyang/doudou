@@ -48,15 +48,21 @@ class Shot
 '''
 
 MAIN = '''
-    /// <summary>递归找到LicenseForm 的授权码输入框并填值（用于验证文字渲染）。</summary>
-    static void PrefillCode(Control root, string text)
+    /// <summary>
+    /// 递归找到**所有可编辑的** TextBox（授权码框）并填值，用于验证文字渲染。
+    /// 注意：不能"填第一个就 return" —— 机器码框虽是 ReadOnly，
+    /// 但遍历顺序变化时容易误判；这里改成"全部非只读框都填"，行为更确定。
+    /// </summary>
+    static int PrefillCode(Control root, string text)
     {
+        int n = 0;
         foreach (Control c in root.Controls)
         {
             var tb = c as TextBox;
-            if (tb != null && !tb.ReadOnly) { tb.Text = text; return; }
-            PrefillCode(c, text);
+            if (tb != null && !tb.ReadOnly) { tb.Text = text; tb.Invalidate(); n++; }
+            n += PrefillCode(c, text);
         }
+        return n;
     }
 
     [STAThread]
@@ -137,8 +143,9 @@ def main():
     # 自检：重复定义会在编译期报 CS0111，这里提前挡住
     checks = {
         "class LicenseForm": 1, "static class Rounded": 1,
-        "class GradientPanel": 1, "class GlassCard": 1,
-        "class RoundedButton": 1, "class FieldShell": 1,
+        "class FlatPanel": 1, "class GlassCard": 1,
+        "class RoundedButton": 1, "class HoverCircle": 1,
+        "class FieldShell": 1,
         "class GradientLabel": 1, "class IconBox": 1,
         "static void MakeRounded(": 1,
     }

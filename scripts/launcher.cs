@@ -300,15 +300,24 @@ class JinyuTVLauncher
     [DllImport("user32.dll")] static extern bool ReleaseCapture();
     [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
 
-/// <summary>圆角矩形几何：所有自绘控件共用。</summary>
+/// <summary>
+    /// 圆角矩形几何：所有自绘控件共用。
+    ///
+    /// ⚠️ 关键：四个角的直径 d 必须**算一次、四角共用**。
+    /// 早先的实现是 `if (d > r.Height) d = r.Height; if (d > r.Width) d = r.Width;`
+    /// 逐边裁剪 —— 当圆角半径接近短边一半时，横向两弧被裁成一个值、纵向两弧被裁成另一个值，
+    /// 四条弧对不上，圆角处就出现"豁口/错位"（用户截图里卡片右上角那个缺口就是这个）。
+    /// 正确做法：d 取 min(2*radius, width, height)，四角统一。
+    /// </summary>
     static class Rounded
     {
         public static System.Drawing.Drawing2D.GraphicsPath Rect(RectangleF r, int radius)
         {
             var path = new System.Drawing.Drawing2D.GraphicsPath();
+            if (r.Width <= 0 || r.Height <= 0) return path;
             float d = Math.Max(1f, radius * 2f);
-            if (d > r.Height) d = r.Height;
-            if (d > r.Width) d = r.Width;
+            // 一次算清，四角共用 —— 保证四条弧半径一致，接缝严丝合缝
+            d = Math.Min(d, Math.Min(r.Width, r.Height));
             path.AddArc(r.X, r.Y, d, d, 180, 90);
             path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
             path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
@@ -319,19 +328,25 @@ class JinyuTVLauncher
     }
 
     /// <summary>
-    /// 渐变背景容器。
+    /// 纯色深色背景容器（用户要求：不要渐变，就深色背景）。
+    ///
+    /// 光晕的坑（踩过）：子控件设 BackColor=Transparent 时，WinForms 会用
+    /// **子控件的矩形**作为裁剪区去调父级的 OnPaintBackground。若在父级里画一个
+    /// 大半径径向光晕，裁剪边界正巧切到光晕的色阶变化处，就会在控件位置浮出
+    /// 一个**硬边矩形紫斑**（关闭按钮后面那块紫方块就是这么来的）。
+    /// 所以：光晕半径必须远大于任何子控件、且同心于面板，
+    /// 或者干脆关掉。这里默认关（Glow=false），需要时再开。
+    ///
     /// ⚠️ 背景必须画在 OnPaintBackground（不是 OnPaint）：子控件设
     /// BackColor=Transparent 时，WinForms 是调用**父控件的 OnPaintBackground**
-    /// 来模拟透明的。若画在 OnPaint，子控件区域会露出父级纯色，渐变被"挖洞"。
+    /// 来模拟透明的。若画在 OnPaint，子控件区域会露出父级纯色，背景被"挖洞"。
     /// </summary>
-    class GradientPanel : Panel
+    class FlatPanel : Panel
     {
-        public Color FromColor = Color.FromArgb(0x1B, 0x12, 0x32);
-        public Color ToColor = Color.FromArgb(0x0E, 0x0A, 0x1C);
-        public float Angle = 90f;
+        public Color Fill = Color.FromArgb(0x11, 0x11, 0x13);
         public bool Glow = false;
 
-        public GradientPanel()
+        public FlatPanel()
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
@@ -341,14 +356,14 @@ class JinyuTVLauncher
             var g = e.Graphics;
             var rect = new Rectangle(0, 0, Width, Height);
             if (rect.Width <= 0 || rect.Height <= 0) return;
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (var br = new System.Drawing.Drawing2D.LinearGradientBrush(rect, FromColor, ToColor, Angle))
-                g.FillRectangle(br, rect);
-            if (Glow)
+            using (var br = new SolidBrush(Fill)) g.FillRectangle(br, rect);
+
+            if (Glow && e.ClipRectangle.Width >= Width - 2 && e.ClipRectangle.Height >= Height - 2)
             {
-                // GDI+ 没有径向渐变，用两层低透明度椭圆近似"右上角光晕"
-                DrawGlow(g, Width * 0.88f, -Height * 0.20f, Width * 0.72f, 58);
-                DrawGlow(g, Width * 1.05f, Height * 0.34f, Width * 0.52f, 34);
+                // 只在"整面重绘"时才画光晕 —— 子控件触发的局部重绘一律跳过，
+                // 从根上杜绝上面说的"硬边紫斑"。
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                DrawGlow(g, Width * 0.82f, -Height * 0.08f, Width * 0.55f, 10);
             }
         }
 
@@ -359,47 +374,94 @@ class JinyuTVLauncher
                 path.AddEllipse(cx - r, cy - r, r * 2, r * 2);
                 using (var brush = new System.Drawing.Drawing2D.PathGradientBrush(path))
                 {
-                    brush.CenterColor = Color.FromArgb(alpha, 0x8B, 0x5C, 0xE8);
-                    brush.SurroundColors = new[] { Color.FromArgb(0, 0x8B, 0x5C, 0xE8) };
+                    brush.CenterColor = Color.FromArgb(alpha, 0xFF, 0x9F, 0xFC);
+                    brush.SurroundColors = new[] { Color.FromArgb(0, 0xFF, 0x9F, 0xFC) };
                     g.FillPath(brush, path);
                 }
             }
         }
     }
 
-    /// <summary>玻璃卡片：圆角填充 + 描边。填充同样走 OnPaintBackground。</summary>
+    /// <summary>
+    /// 卡片：圆角填充 + 1px 描边。填充走 OnPaintBackground（透明子控件靠它透出）。
+    ///
+    /// ⚠️ 描边为什么不用 (0.5, 0.5, W-1, H-1)：
+    ///     0.5 偏移 + 抗锯齿在**圆角处**会让路径首尾两个 AddArc 的接缝错开半个像素，
+    ///     表现为卡片右上角出现一个"豁口"，描边看着没闭合（用户截图里正是这个）。
+    ///     正确做法：用整数内缩矩形 (0,0,W-1,H-1)，路径严格闭合，四条边齐平。
+    /// </summary>
     class GlassCard : Panel
     {
-        public int Radius = 16;
-        public Color Fill = Color.FromArgb(0x29, 0x21, 0x42);
-        public Color Border = Color.FromArgb(0x4E, 0x40, 0x86);
+        public int Radius = 14;
+        public Color Fill = Color.FromArgb(0x1A, 0x1A, 0x1D);
+        public Color Border = Color.FromArgb(0x2C, 0x2C, 0x32);
 
         public GlassCard()
         {
             SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
 
+        /// <summary>
+        /// 把控件自身的 **Region** 设成圆角路径。
+        ///
+        /// 为什么必须这么做（踩过的坑）：
+        ///   只在 OnPaint 里画圆角是不够的 —— 子控件（内嵌输入框）重绘时，
+        ///   WinForms 会用**自己的方形矩形**去裁剪父级背景重绘。于是卡片右上角的
+        ///   圆角弧被方形裁剪切出一道**阶梯状豁口**，描边在拐角处整段消失
+        ///   （放大 6 倍能清晰看到锯齿）。把 Region 设成圆角后，裁剪区本身是圆的，
+        ///   子控件再重绘也不会切坏圆角。
+        /// </summary>
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            ApplyRoundRegion();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyRoundRegion();
+        }
+
+        void ApplyRoundRegion()
+        {
+            if (Width <= 1 || Height <= 1) return;
+            using (var path = Rounded.Rect(new RectangleF(0, 0, Width, Height), Radius))
+            {
+                var old = Region;
+                Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
+        }
+
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             if (Width <= 1 || Height <= 1) return;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (var path = Rounded.Rect(new RectangleF(0, 0, Width, Height), Radius))
             using (var br = new SolidBrush(Fill))
-                e.Graphics.FillPath(br, path);
+                e.Graphics.FillRectangle(br, 0, 0, Width, Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             if (Width <= 1 || Height <= 1) return;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            // 描边画在偏移 0.5 的整数网格上，1px 线严格落在像素中心，四边粗细一致
             using (var path = Rounded.Rect(new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), Radius))
             using (var pen = new Pen(Border, 1f))
                 e.Graphics.DrawPath(pen, path);
-            base.OnPaint(e);
+            // ⚠️ 绝不能调 base.OnPaint(e)：Panel 的基类实现会用自己的 BackColor
+            //    **从 (0,0) 起铺满整个矩形**，把刚画好的圆角描边和圆角外的透明区一起盖掉 ——
+            //    表现就是"卡片右上角缺一个直角缺口"。这是本控件最容易踩的坑。
         }
     }
 
-    /// <summary>按钮：纯色或渐变填充 + 可选描边（激活=渐变，取消/复制=描边）。</summary>
+    /// <summary>
+    /// 按钮：纯色或渐变填充 + 可选描边，带 hover / pressed 三态反馈。
+    ///
+    /// 三态怎么做：OnMouseEnter/Leave/Down/Up 只翻一个枚举，重绘交给 Invalidate。
+    /// 不做 base.OnPaint —— Flat 按钮的系统绘制会把圆角与渐变盖掉。
+    /// </summary>
     class RoundedButton : Button
     {
         public int Radius = 10;
@@ -407,6 +469,11 @@ class JinyuTVLauncher
         public Color GradientTo = Color.Empty;
         public Color BorderColor = Color.Empty;
         public int BorderWidth = 1;
+        /// <summary>禁用按下的"下沉感"。</summary>
+        public bool PressedShift = true;
+
+        enum BtnState { Normal, Hover, Pressed }
+        BtnState _state = BtnState.Normal;
 
         public RoundedButton()
         {
@@ -416,31 +483,105 @@ class JinyuTVLauncher
                      | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         }
 
+        protected override void OnMouseEnter(EventArgs e) { _state = BtnState.Hover; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { _state = BtnState.Normal; Invalidate(); base.OnMouseLeave(e); }
+        protected override void OnMouseDown(MouseEventArgs e) { _state = BtnState.Pressed; Invalidate(); base.OnMouseDown(e); }
+        protected override void OnMouseUp(MouseEventArgs e) { _state = BtnState.Hover; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnEnabledChanged(EventArgs e) { _state = BtnState.Normal; Invalidate(); base.OnEnabledChanged(e); }
+
+        /// <summary>按状态把颜色整体提亮/压暗，避免为每个状态都写一组配色。</summary>
+        static Color Shift(Color c, int delta)
+        {
+            if (c == Color.Empty) return c;
+            int r = Math.Min(255, Math.Max(0, c.R + delta));
+            int g = Math.Min(255, Math.Max(0, c.G + delta));
+            int b = Math.Min(255, Math.Max(0, c.B + delta));
+            return Color.FromArgb(c.A, r, g, b);
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (var path = Rounded.Rect(new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), Radius))
+
+            int dy = (_state == BtnState.Pressed && PressedShift && Enabled) ? 1 : 0;
+            var rect = new RectangleF(0.5f, 0.5f + dy, Width - 1f, Height - 1f);
+
+            int tint = _state == BtnState.Hover ? 14 : (_state == BtnState.Pressed ? -12 : 0);
+            if (!Enabled) tint = -18;
+
+            using (var path = Rounded.Rect(rect, Radius))
             {
                 if (GradientFrom != Color.Empty && GradientTo != Color.Empty)
                 {
                     using (var br = new System.Drawing.Drawing2D.LinearGradientBrush(
-                        new Rectangle(0, 0, Width, Height), GradientFrom, GradientTo, 0f))
+                        new Rectangle(0, 0, Width, Height), Shift(GradientFrom, tint), Shift(GradientTo, tint), 0f))
                         g.FillPath(br, path);
                 }
                 else
                 {
-                    using (var br = new SolidBrush(BackColor)) g.FillPath(br, path);
+                    using (var br = new SolidBrush(Shift(BackColor, tint))) g.FillPath(br, path);
                 }
                 if (BorderColor != Color.Empty)
                 {
-                    using (var pen = new Pen(BorderColor, BorderWidth)) g.DrawPath(pen, path);
+                    using (var pen = new Pen(Shift(BorderColor, tint / 2), BorderWidth)) g.DrawPath(pen, path);
                 }
             }
+
             // 文字自绘：不调 base.OnPaint，否则 Flat 按钮会盖掉圆角与渐变
-            TextRenderer.DrawText(g, Text, Font, new Rectangle(0, 0, Width, Height), ForeColor,
+            Color fg = Enabled ? ForeColor : Color.FromArgb(0x6A, 0x6A, 0x72);
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(0, dy, Width, Height), fg,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
                 | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        }
+    }
+
+    /// <summary>
+    /// 悬停才出现的圆形底衬（关闭按钮等"弱功能"控件用）。
+    ///
+    /// 为什么不用 RoundedButton 给它填色：在纯深色窗体上，一个常驻的方形/圆形色块
+    /// 会变成一个突兀的"补丁"。正确做法是**平时完全透明**，只在鼠标进入时浮出
+    /// 一圈低对比度圆底 —— 这是当前主流桌面应用的通用做法。
+    /// </summary>
+    class HoverCircle : Panel
+    {
+        public Color HoverFill = Color.FromArgb(0x28, 0x28, 0x2C);
+        bool _hover;
+
+        public HoverCircle()
+        {
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
+                     | ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
+
+        /// <summary>
+        /// 即使不悬停也必须**主动把自己的区域涂成父级底色**。
+        ///
+        /// 踩过的坑：早先不悬停时什么都不画，屏幕上看着没问题，但
+        /// `PrintWindow` 截图时这块区域因为从未被任何一帧覆盖，会捕获到
+        /// 残留的显存内容 —— 表现是关闭按钮背后浮出一块**硬边紫方块**。
+        /// 结论：设了 Transparent 的自绘控件，也必须自己把底填一遍，
+        /// 不能指望"不画=露出父级"。
+        /// </summary>
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (Width <= 1 || Height <= 1) return;
+            var parentBg = (Parent != null) ? Parent.BackColor : Color.FromArgb(0x11, 0x11, 0x13);
+            if (parentBg.A == 0) parentBg = Color.FromArgb(0x11, 0x11, 0x13);
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            if (!_hover)
+            {
+                using (var br = new SolidBrush(parentBg)) e.Graphics.FillRectangle(br, 0, 0, Width, Height);
+                return;
+            }
+            using (var br0 = new SolidBrush(parentBg)) e.Graphics.FillRectangle(br0, 0, 0, Width, Height);
+            using (var path = Rounded.Rect(new RectangleF(0, 0, Width - 1, Height - 1), Math.Min(Width, Height) / 2))
+            using (var br = new SolidBrush(HoverFill))
+                e.Graphics.FillPath(br, path);
         }
     }
 
@@ -478,7 +619,7 @@ class JinyuTVLauncher
             {
                 AutoSize = false,
                 BackColor = Color.Transparent,
-                ForeColor = Color.FromArgb(0x6E, 0x66, 0x8E),
+                ForeColor = Color.FromArgb(0x82, 0x82, 0x8C),
                 TextAlign = ContentAlignment.MiddleLeft,
             };
             _placeholder.Click += delegate { _inner.Focus(); };
@@ -495,13 +636,30 @@ class JinyuTVLauncher
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            ApplyRoundRegion();
             LayoutInner();
         }
 
         protected override void OnSizeChanged(EventArgs e)
         {
             base.OnSizeChanged(e);
+            ApplyRoundRegion();
             LayoutInner();
+        }
+
+        /// <summary>
+        /// 同 GlassCard：Region 设成圆角，避免内嵌 TextBox 重绘时用方形裁剪
+        /// 把外壳的圆角切出阶梯豁口。
+        /// </summary>
+        void ApplyRoundRegion()
+        {
+            if (Width <= 1 || Height <= 1) return;
+            using (var path = Rounded.Rect(new RectangleF(0, 0, Width, Height), Radius))
+            {
+                var old = Region;
+                Region = new Region(path);
+                if (old != null) old.Dispose();
+            }
         }
 
         protected override void OnFontChanged(EventArgs e)
@@ -524,28 +682,44 @@ class JinyuTVLauncher
 
         void SyncPlaceholder()
         {
-            _placeholder.Visible = _inner.TextLength == 0;
-            if (_placeholder.Visible) _placeholder.BringToFront();
+            bool show = _inner.TextLength == 0;
+            if (_placeholder.Visible != show)
+            {
+                _placeholder.Visible = show;
+                if (show) _placeholder.BringToFront();
+                // 隐藏占位符后必须让外壳与输入框重绘一遍：
+                // 占位符曾被 BringToFront 盖在 TextBox 上方，直接设 Visible=false
+                // 在部分时序下不会触发其所在区域重绘，表现为"明明有值，占位提示还在"。
+                Invalidate(true);
+                _inner.Invalidate();
+            }
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             if (Width <= 1 || Height <= 1) return;
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (var path = Rounded.Rect(new RectangleF(0, 0, Width, Height), Radius))
-            {
-                using (var br = new SolidBrush(BackColor)) e.Graphics.FillPath(br, path);
-                using (var pen = new Pen(_focused ? FocusBorderColor : BorderColor, 1f))
-                    e.Graphics.DrawPath(pen, path);
-            }
+            // Region 已裁成圆角，这里直接铺满即可；只把描边按圆角路径画细
+            using (var br = new SolidBrush(BackColor))
+                e.Graphics.FillRectangle(br, 0, 0, Width, Height);
+            using (var path = Rounded.Rect(new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f), Radius))
+            using (var pen = new Pen(_focused ? FocusBorderColor : BorderColor, _focused ? 1.4f : 1f))
+                e.Graphics.DrawPath(pen, path);
         }
     }
 
-    /// <summary>渐变色文字（参考图的 “JinyuTV” 标题）。</summary>
+    /// <summary>
+    /// 渐变色文字（首页 “JinyuDream” 字标的同款做法：把渐变当文字填充色）。
+    /// 渐变方向 0°（左→右），与首页 CSS `linear-gradient(90deg, ...)` 一致。
+    /// </summary>
     class GradientLabel : Control
     {
         public Color FromColor = Color.FromArgb(0xB4, 0x8A, 0xEE);
         public Color ToColor = Color.FromArgb(0xE0, 0xCC, 0xFC);
+        /// <summary>true = 文字水平居中（首页字标就是居中）。</summary>
+        public bool AlignCenter = false;
+        /// <summary>要铺的底色（窗体底色），必须由调用方指定。</summary>
+        public Color BgColor = Color.FromArgb(0x11, 0x11, 0x13);
 
         public GradientLabel()
         {
@@ -553,6 +727,17 @@ class JinyuTVLauncher
                      | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
                      | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
+        }
+
+        /// <summary>
+        /// 同 IconBox：透明自绘控件必须自己铺底，否则截图会有残留色斑。
+        /// 注意这里改用 BgColor（= 窗体底色），不是 Parent.BackColor ——
+        /// GradientLabel 永远直接挂在窗体底的 FlatPanel 上。
+        /// </summary>
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (Width <= 0 || Height <= 0) return;
+            using (var br = new SolidBrush(BgColor)) e.Graphics.FillRectangle(br, 0, 0, Width, Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -566,18 +751,39 @@ class JinyuTVLauncher
             {
                 var sf = new StringFormat();
                 sf.LineAlignment = StringAlignment.Center;
-                sf.Alignment = StringAlignment.Near;
+                sf.Alignment = AlignCenter ? StringAlignment.Center : StringAlignment.Near;
                 g.DrawString(Text, Font, br, new RectangleF(0, 0, Width, Height), sf);
             }
         }
     }
 
-    /// <summary>矢量图标（显示器 / 钥匙 / 问号 / 关闭 / 星球 logo），GDI+ 画，免外部资源。</summary>
+    /// <summary>
+    /// 图标控件。两类来源：
+    ///   1. `Kind == "logo"` —— 加载**真实品牌 logo 图片**（磁盘上的 logo.png / logo.ico）。
+    ///      用户明确要求用自己的 logo，不再手绘星球（手绘版无论如何都不像）。
+    ///   2. 其余 —— GDI+ 矢量描边图标（显示器 / 钥匙 / 关闭 / 问号 / 盾牌 / 复制 / 箭头）。
+    ///
+    /// 版权注意：这里只做"按需绘制"，不修改 logo 像素，保持品牌原色。
+    /// </summary>
     class IconBox : Control
     {
         public string Kind = "monitor";
         public Color Stroke = Color.FromArgb(0xA9, 0x8B, 0xEA);
-        public float StrokeWidth = 1.7f;
+        public float StrokeWidth = 1.6f;
+        /// <summary>logo 图片的搜索目录（由 LicenseForm 注入，通常为程序根目录）。</summary>
+        public string BaseDir = "";
+        /// <summary>圆角半径（仅 logo 用；圆形 logo 传 0 表示不裁切）。</summary>
+        public int CropRadius = 0;
+        /// <summary>
+        /// 自绘控件要铺的底色。**必须由调用方显式指定**，不能用 Parent.BackColor ——
+        /// 父级（GlassCard）的 BackColor 是它构造时的属性值(#141414)，
+        /// 而它实际画出来的面是更亮的 Fill(#1A1A1D)。用 BackColor 会让图标周围
+        /// 浮出一个比卡片更暗的小方块。
+        /// </summary>
+        public Color BgColor = Color.FromArgb(0x11, 0x11, 0x13);
+
+        static Image _logoCache;
+        static string _logoCachePath;
 
         public IconBox()
         {
@@ -587,37 +793,88 @@ class JinyuTVLauncher
             BackColor = Color.Transparent;
         }
 
+        /// <summary>
+        /// 按候选顺序找真实 logo。优先 PNG（带透明通道、显示最干净），
+        /// 再退回 ICO。找不到返回 null，调用方自行降级。
+        /// </summary>
+        static Image LoadLogo(string baseDir)
+        {
+            if (string.IsNullOrEmpty(baseDir)) baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string[] names = { "logo.png", "assets\\logo.png", "logo.ico", "assets\\logo.ico" };
+            foreach (string n in names)
+            {
+                string p = Path.Combine(baseDir, n);
+                if (!File.Exists(p)) continue;
+                if (p == _logoCachePath && _logoCache != null) return _logoCache;
+                try
+                {
+                    // 先读进内存流再用 —— 直接从文件构造 Image 会长期锁住该文件，
+                    // 后续重新打包替换 logo 时会失败（"文件正被另一进程使用"）。
+                    byte[] bytes = File.ReadAllBytes(p);
+                    using (var ms = new MemoryStream(bytes))
+                    {
+                        var img = Image.FromStream(ms);
+                        _logoCache = img;
+                        _logoCachePath = p;
+                        return img;
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 自绘控件设了 BackColor=Transparent 后，**必须自己把底填一遍**。
+        /// 不填的话：屏幕上看不出问题，但 PrintWindow 截图会捕获到残留显存，
+        /// 在控件矩形处浮出一块硬边色斑（关闭按钮后的紫方块即此因）。
+        /// 这里统一从父级取底色铺满，再画图标。
+        /// </summary>
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            if (Width <= 0 || Height <= 0) return;
+            Color bg = (Parent != null) ? Parent.BackColor : Color.FromArgb(0x11, 0x11, 0x13);
+            if (bg.A == 0) bg = Color.FromArgb(0x11, 0x11, 0x13);
+            using (var br = new SolidBrush(bg)) e.Graphics.FillRectangle(br, 0, 0, Width, Height);
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
             float w = Width, h = Height;
 
             if (Kind == "logo")
             {
-                // 深色圆盘 + 渐变星球 + 环绕光环（参考图的品牌标识）。
-                // 顺序很关键：先画光环后半 → 再画球 → 最后画光环前半，
-                // 这样环才像"穿过"球体，而不是贴在球前面。
-                using (var plate = new SolidBrush(Color.FromArgb(0x27, 0x1E, 0x46)))
-                    g.FillEllipse(plate, 0, 0, w, h);
-
-                var ball = new RectangleF(w * 0.22f, h * 0.22f, w * 0.56f, h * 0.56f);
-                var ring = new RectangleF(w * 0.07f, h * 0.34f, w * 0.86f, h * 0.32f);
-
-                using (var penRing = new Pen(Color.FromArgb(0xB0, 0x8C, 0xEC), 2.2f))
+                var img = LoadLogo(BaseDir);
+                if (img != null)
                 {
-                    penRing.StartCap = System.Drawing.Drawing2D.LineCap.Round;
-                    penRing.EndCap = System.Drawing.Drawing2D.LineCap.Round;
-                    // 后半环（上弧）
-                    g.DrawArc(penRing, ring.X, ring.Y, ring.Width, ring.Height, 180f, 180f);
-
-                    using (var br = new System.Drawing.Drawing2D.LinearGradientBrush(
-                        ball, Color.FromArgb(0xE0, 0xCC, 0xFC), Color.FromArgb(0x6D, 0x3F, 0xC9), 60f))
-                        g.FillEllipse(br, ball);
-
-                    // 前半环（下弧）压在球上
-                    g.DrawArc(penRing, ring.X, ring.Y, ring.Width, ring.Height, 0f, 180f);
+                    // 等比缩放居中，避免不同尺寸 logo 被拉变形
+                    float scale = Math.Min(w / img.Width, h / img.Height);
+                    float dw = img.Width * scale, dh = img.Height * scale;
+                    var dest = new RectangleF((w - dw) / 2f, (h - dh) / 2f, dw, dh);
+                    if (CropRadius > 0)
+                    {
+                        using (var path = Rounded.Rect(dest, CropRadius))
+                        {
+                            var old = g.Clip;
+                            g.SetClip(path);
+                            g.DrawImage(img, dest);
+                            g.Clip = old;
+                        }
+                    }
+                    else
+                    {
+                        g.DrawImage(img, dest);
+                    }
+                    return;
                 }
+                // 降级：找不到图片文件时画一个中性圆角方块，而不是再手绘假星球
+                using (var br = new SolidBrush(Color.FromArgb(0x26, 0x26, 0x27)))
+                using (var path = Rounded.Rect(new RectangleF(0, 0, w - 1, h - 1), 12))
+                    g.FillPath(br, path);
                 return;
             }
 
@@ -625,25 +882,64 @@ class JinyuTVLauncher
             {
                 pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
                 pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Round;
 
                 if (Kind == "monitor")
                 {
-                    g.DrawRectangle(pen, 1.5f, 3f, w - 3f, h - 9f);
-                    g.DrawLine(pen, w / 2f, h - 6f, w / 2f, h - 3f);
-                    g.DrawLine(pen, w * 0.28f, h - 2.5f, w * 0.72f, h - 2.5f);
+                    // 显示器：圆角屏 + 支架。用 GraphicsPath 画圆角屏比 DrawRectangle 精致得多
+                    var scr = new RectangleF(1f, 1.5f, w - 2f, h * 0.66f);
+                    using (var p = Rounded.Rect(scr, 3))
+                        g.DrawPath(pen, p);
+                    g.DrawLine(pen, w / 2f, h * 0.66f + 1.5f, w / 2f, h * 0.82f);
+                    g.DrawLine(pen, w * 0.30f, h * 0.84f, w * 0.70f, h * 0.84f);
                 }
                 else if (Kind == "key")
                 {
-                    float r = h * 0.30f;
-                    g.DrawEllipse(pen, 1f, h * 0.5f - r, r * 2f, r * 2f);
-                    g.DrawLine(pen, r * 2f + 1f, h * 0.5f, w - 1.5f, h * 0.5f);
-                    g.DrawLine(pen, w - 1.5f, h * 0.5f, w - 1.5f, h * 0.72f);
-                    g.DrawLine(pen, w - 6f, h * 0.5f, w - 6f, h * 0.66f);
+                    // 钥匙：环 + 杆 + 两齿。全部按 w/h 比例定位，任何尺寸下都不越界。
+                    // 早先版本环画在 w*0.06 且齿用绝对值，小尺寸下齿会顶出右边界被裁。
+                    float ring = Math.Min(w, h) * 0.34f;      // 环直径
+                    float cx = w * 0.22f;                      // 环心 x
+                    float cy = h * 0.50f;                      // 环心 y（垂直居中）
+                    g.DrawEllipse(pen, cx - ring / 2f, cy - ring / 2f, ring, ring);
+                    float shaftStart = cx + ring / 2f;
+                    float shaftEnd = w * 0.90f;
+                    g.DrawLine(pen, shaftStart, cy, shaftEnd, cy);
+                    // 齿：从杆往下，长度按 h 比例，位置在杆的后半段
+                    g.DrawLine(pen, w * 0.64f, cy, w * 0.64f, cy + h * 0.22f);
+                    g.DrawLine(pen, w * 0.82f, cy, w * 0.82f, cy + h * 0.16f);
+                }
+                else if (Kind == "shield")
+                {
+                    // 盾牌：品牌/安全语义，用于顶部"正版授权"标识
+                    var p = new System.Drawing.Drawing2D.GraphicsPath();
+                    float top = h * 0.08f, bot = h * 0.92f;
+                    p.AddLine(w * 0.5f, top, w * 0.9f, top + h * 0.12f);
+                    p.AddLine(w * 0.9f, top + h * 0.12f, w * 0.9f, h * 0.52f);
+                    p.AddBezier(w * 0.9f, h * 0.52f, w * 0.9f, h * 0.80f, w * 0.5f, bot, w * 0.5f, bot);
+                    p.AddBezier(w * 0.5f, bot, w * 0.1f, h * 0.80f, w * 0.1f, h * 0.52f, w * 0.1f, h * 0.52f);
+                    p.AddLine(w * 0.1f, h * 0.52f, w * 0.1f, top + h * 0.12f);
+                    p.CloseFigure();
+                    g.DrawPath(pen, p);
+                    // 盾内对勾
+                    g.DrawLine(pen, w * 0.32f, h * 0.50f, w * 0.45f, h * 0.64f);
+                    g.DrawLine(pen, w * 0.45f, h * 0.64f, w * 0.70f, h * 0.36f);
+                }
+                else if (Kind == "copy")
+                {
+                    // 复制：两张叠纸（比纯文字"复制"更直观）
+                    var back = new RectangleF(w * 0.06f, h * 0.06f, w * 0.60f, h * 0.60f);
+                    var front = new RectangleF(w * 0.30f, h * 0.30f, w * 0.64f, h * 0.64f);
+                    using (var p1 = Rounded.Rect(back, 2)) g.DrawPath(pen, p1);
+                    using (var p2 = Rounded.Rect(front, 2))
+                    {
+                        using (var bg = new SolidBrush(Color.Transparent)) { }
+                        g.DrawPath(pen, p2);
+                    }
                 }
                 else if (Kind == "close")
                 {
-                    g.DrawLine(pen, 3f, 3f, w - 3f, h - 3f);
-                    g.DrawLine(pen, w - 3f, 3f, 3f, h - 3f);
+                    g.DrawLine(pen, w * 0.24f, h * 0.24f, w * 0.76f, h * 0.76f);
+                    g.DrawLine(pen, w * 0.76f, h * 0.24f, w * 0.24f, h * 0.76f);
                 }
                 else if (Kind == "help")
                 {
@@ -654,7 +950,7 @@ class JinyuTVLauncher
                         var sf = new StringFormat();
                         sf.LineAlignment = StringAlignment.Center;
                         sf.Alignment = StringAlignment.Center;
-                        g.DrawString("?", f, b, new RectangleF(0, 0, w, h), sf);
+                        g.DrawString("?", f, b, new RectangleF(0, -0.5f, w, h), sf);
                     }
                 }
             }
@@ -689,223 +985,284 @@ public LicenseForm(string machine, string reason)
             _machine = machine ?? "";
             _reason = reason ?? "";
 
-            // ---- 配色（按参考图的紫罗兰主题）----
-            Color bgTop = Color.FromArgb(0x1B, 0x12, 0x32);
-            Color bgBottom = Color.FromArgb(0x0E, 0x0A, 0x1C);
-            Color cardFill = Color.FromArgb(0x29, 0x21, 0x42);
-            Color cardBorder = Color.FromArgb(0x4E, 0x40, 0x86);
-            Color slotFill = Color.FromArgb(0x1B, 0x15, 0x33);
-            Color slotBorder = Color.FromArgb(0x46, 0x3A, 0x74);
-            Color accentHi = Color.FromArgb(0x8B, 0x6F, 0xE8);
-            Color textHi = Color.FromArgb(0xED, 0xE8, 0xFA);
-            Color textMid = Color.FromArgb(0xB4, 0xAC, 0xCE);
-            Color danger = Color.FromArgb(0xE8, 0x7C, 0x8A);
-            const int CARD_R = 16;
-            const int EL_R = 10;
+            // ==================================================================
+            //  设计令牌（Design Tokens）
+            //
+            //  全部取自软件本体 Element Plus 深色主题的真实变量，不再自创紫色：
+            //    --el-bg-color-page:      #0a0a0a
+            //    --el-bg-color:           #141414
+            //    --el-bg-color-overlay:   #1d1e1f
+            //    --el-fill-color-light:   #262727
+            //    --el-border-color-extra-light: #2b2b2c
+            //    --el-text-color-primary: #e5eaf3
+            //    --el-text-color-secondary:#a3a6ad
+            //  这样弹窗与主界面**同源**，不再有"跟软件不搭"的问题。
+            // ==================================================================
+            // —— 中性色阶 ——
+            Color bgPage = Color.FromArgb(0x11, 0x11, 0x12);   // 窗体底（比 page 略暖，避免纯黑发灰）
+            Color surface = Color.FromArgb(0x1A, 0x1A, 0x1C);  // 卡片面
+            Color surfaceHi = Color.FromArgb(0x22, 0x22, 0x25); // 卡片内嵌槽
+            Color borderSub = Color.FromArgb(0x2E, 0x2E, 0x32);  // 常规描边
+            Color borderSoft = Color.FromArgb(0x26, 0x26, 0x29); // 弱描边
+            // —— 文本色阶 ——
+            Color textPri = Color.FromArgb(0xE8, 0xE8, 0xEC);
+            Color textSec = Color.FromArgb(0x9A, 0x9A, 0xA2);
+            Color textTer = Color.FromArgb(0x6E, 0x6E, 0x76);
+            // —— 品牌强调色（取自 logo 三色，用于按钮/焦点/图标）——
+            Color brandA = Color.FromArgb(0x7C, 0x5C, 0xF0);   // 主紫
+            Color brandB = Color.FromArgb(0xE0, 0x6C, 0xC8);   // 品红
+            Color ok = Color.FromArgb(0x5C, 0xC9, 0x8A);
+            Color danger = Color.FromArgb(0xF0, 0x7A, 0x7A);
+            // —— 间距令牌（8pt 栅格）——
+            const int PAD = 36;          // 窗体左右内边距
+            const int GAP = 14;          // 区块间距
+            // —— 圆角令牌 ——
+            const int R_WINDOW = 16;
+            const int R_CARD = 12;
+            const int R_CTRL = 9;
+
+            const int W = 620;
+            const int H = 496;
 
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.None;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(640, 448);
-            BackColor = bgTop;
-            ForeColor = textHi;
+            ClientSize = new Size(W, H);
+            BackColor = bgPage;
+            ForeColor = textPri;
+            // 字体与首页一致：Inter → Segoe UI → 苹方 → 雅黑
             Font = new Font("Microsoft YaHei UI", 9F);
             KeyPreview = true;
-            MakeRounded(this, 18);
+            MakeRounded(this, R_WINDOW);
 
-            // ---- 背景：渐变 + 右上光晕（作为其他控件的父级，透明才能透出渐变）----
-            var backdrop = new GradientPanel
+            // ---- 背景：纯深色 + 顶部极淡品牌晕染（不是渐变背景）----
+            var backdrop = new FlatPanel
             {
-                Bounds = new Rectangle(0, 0, 640, 448),
-                FromColor = bgTop,
-                ToColor = bgBottom,
-                Angle = 90f,
+                Bounds = new Rectangle(0, 0, W, H),
+                Fill = bgPage,
                 Glow = true,
-                BackColor = bgTop,
+                BackColor = bgPage,
             };
             backdrop.MouseDown += delegate { DragWindow(); };
 
+            // ---- 关闭按钮：悬停才浮出圆形底，平时只有一个干净叉号 ----
+            // 不能让 RoundedButton 填深色底 —— 那块方形色块在纯深底上很显眼（用户截图里就是）。
+            // 改用 FlatPanel 作容器（透明底），由它管 hover，叉号是子控件。
+            var closeBtn = new HoverCircle
+            {
+                Bounds = new Rectangle(W - 52, 18, 34, 34),
+                Cursor = Cursors.Hand,
+            };
             var closeIcon = new IconBox
             {
                 Kind = "close",
-                Stroke = Color.FromArgb(0xC8, 0xC0, 0xE0),
-                StrokeWidth = 1.8f,
-                Bounds = new Rectangle(590, 32, 18, 18),
+                Stroke = textSec,
+                StrokeWidth = 1.5f,
+                BgColor = bgPage,
+                Bounds = new Rectangle(10, 10, 14, 14),
                 Cursor = Cursors.Hand,
             };
             closeIcon.Click += delegate { Close(); };
+            closeBtn.Click += delegate { Close(); };
+            closeBtn.Controls.Add(closeIcon);
 
-            // ---- 品牌区 ----
+            // ---- 品牌区（logo + 字标，居中）----
             var logo = new IconBox
             {
                 Kind = "logo",
-                Bounds = new Rectangle(44, 40, 78, 78),
+                BaseDir = AppDomain.CurrentDomain.BaseDirectory,
+                BgColor = bgPage,
+                Bounds = new Rectangle((W - 56) / 2, 44, 56, 56),
             };
             logo.MouseDown += delegate { DragWindow(); };
 
+            // 字标用首页同款渐变（#5227FF → #FF9FFC → #B497CF）
             var brand = new GradientLabel
             {
                 Text = "JinyuTV",
-                Bounds = new Rectangle(146, 46, 260, 46),
-                Font = new Font("Segoe UI", 26F, FontStyle.Bold),
-                FromColor = Color.FromArgb(0xB4, 0x8A, 0xEE),
-                ToColor = Color.FromArgb(0xE4, 0xD4, 0xFE),
+                Bounds = new Rectangle(0, 110, W, 40),
+                Font = new Font("Segoe UI", 25F, FontStyle.Bold),
+                AlignCenter = true,
+                BgColor = bgPage,
+                FromColor = Color.FromArgb(0x6C, 0x5C, 0xFF),
+                ToColor = Color.FromArgb(0xFF, 0x9F, 0xFC),
             };
             brand.MouseDown += delegate { DragWindow(); };
 
             var brandSub = new Label
             {
-                Text = "请输入机器码和授权码完成激活，解锁全部功能",
-                ForeColor = textMid,
-                Font = new Font("Microsoft YaHei UI", 10F),
-                Bounds = new Rectangle(148, 94, 420, 24),
-                BackColor = Color.Transparent,
+                Text = "请输入产品密钥以完成激活",
+                ForeColor = textSec,
+                Font = new Font("Microsoft YaHei UI", 9.5F),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Bounds = new Rectangle(0, 152, W, 22),
+                BackColor = bgPage,
             };
             brandSub.MouseDown += delegate { DragWindow(); };
 
-            // ---- 卡片 1：机器码 ----
+            // ---- 机器码区块 ----
+            const int CARD_Y = 196;
+            const int CARD_H = 104;
             var machineCard = new GlassCard
             {
-                Radius = CARD_R, Fill = cardFill, Border = cardBorder,
-                Bounds = new Rectangle(44, 146, 552, 100),
+                Radius = R_CARD, Fill = surface, Border = borderSoft,
+                Bounds = new Rectangle(PAD, CARD_Y, W - PAD * 2, CARD_H),
             };
             var machineIcon = new IconBox
             {
-                Kind = "monitor", Stroke = accentHi,
-                Bounds = new Rectangle(22, 26, 24, 24),
+                Kind = "monitor", Stroke = textSec, StrokeWidth = 1.5f, BgColor = surface,
+                Bounds = new Rectangle(20, 20, 18, 18),
             };
             var machineLabel = new Label
             {
-                Text = "机器码",
-                ForeColor = textHi,
-                Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold),
-                Bounds = new Rectangle(58, 24, 90, 26),
-                BackColor = Color.Transparent,
-            };
-            var helpIcon = new IconBox
-            {
-                Kind = "help",
-                Stroke = Color.FromArgb(0x8A, 0x80, 0xA8),
-                Bounds = new Rectangle(152, 29, 17, 17),
+                Text = "本机机器码",
+                ForeColor = textSec,
+                Font = new Font("Microsoft YaHei UI", 9F),
+                Bounds = new Rectangle(46, 19, 140, 20),
+                // Label 是不透明原生控件，底色必须等于卡片实际画出的面色(surface)，
+                // 否则会在卡片上留下一个色差小方块
+                BackColor = surface,
             };
             var machineField = new FieldShell
             {
-                Radius = EL_R,
-                Bounds = new Rectangle(54, 54, 336, 34),
-                BackColor = slotFill,
-                BorderColor = slotBorder,
-                FocusBorderColor = accentHi,
+                Radius = R_CTRL,
+                // 宽度 = 卡片宽 - 左右内边距 - 复制按钮宽 - 中间间隙(10)
+                Bounds = new Rectangle(20, 46, machineCard.Width - 20 * 2 - 92 - 10, 38),
+                BackColor = surfaceHi,
+                BorderColor = borderSub,
+                FocusBorderColor = brandA,
             };
-            machineField.Inner.BackColor = slotFill;   // TextBox 不会继承父容器底色，必须显式设
-            machineField.Inner.Font = new Font("Consolas", 12F);
-            machineField.Inner.ForeColor = textHi;
+            machineField.Inner.BackColor = surfaceHi;   // TextBox 不继承父容器底色
+            machineField.Inner.Font = new Font("Consolas", 12.5F);
+            machineField.Inner.ForeColor = textPri;
             machineField.Inner.ReadOnly = true;
             machineField.Inner.TabStop = false;
             machineField.Inner.Cursor = Cursors.Hand;
             machineField.Inner.Text = _machine;
+
+            var copyBtn = new RoundedButton
+            {
+                Radius = R_CTRL,
+                Text = "复制",
+                Bounds = new Rectangle(machineCard.Width - 20 - 92, 46, 92, 38),
+                BackColor = surfaceHi,
+                ForeColor = textPri,
+                BorderColor = borderSub,
+                Font = new Font("Microsoft YaHei UI", 9.5F),
+                TabStop = false,
+                Cursor = Cursors.Hand,
+            };
+            // 复制按钮内嵌一个复制图标（左）+ 文字（右）——图标由 RoundedButton 自身画不了，
+            // 所以把图标作为子控件贴在左侧，文字用 TextAlign 右移解决。
+            var copyGlyph = new IconBox
+            {
+                Kind = "copy", Stroke = textSec, StrokeWidth = 1.4f, BgColor = surfaceHi,
+                Bounds = new Rectangle(16, 11, 15, 15),
+            };
+            copyGlyph.Enabled = false;
+            copyBtn.Controls.Add(copyGlyph);
+
             // 点机器码即复制，文字变绿作为反馈
             machineField.Inner.Click += delegate
             {
                 try
                 {
                     Clipboard.SetText(_machine);
-                    machineField.Inner.ForeColor = Color.FromArgb(0x8F, 0xE0, 0xB0);
+                    machineField.Inner.ForeColor = ok;
                     var back = new System.Windows.Forms.Timer { Interval = 1200 };
                     back.Tick += delegate(object s3, EventArgs e3)
                     {
                         ((System.Windows.Forms.Timer)s3).Stop();
-                        machineField.Inner.ForeColor = textHi;
+                        machineField.Inner.ForeColor = textPri;
                     };
                     back.Start();
                 }
                 catch { }
             };
 
-            var copyBtn = new RoundedButton
-            {
-                Radius = EL_R,
-                Text = "复制",
-                Bounds = new Rectangle(402, 54, 126, 34),
-                BackColor = Color.FromArgb(0x28, 0x20, 0x46),
-                ForeColor = Color.FromArgb(0xC9, 0xB4, 0xF5),
-                BorderColor = accentHi,
-                Font = new Font("Microsoft YaHei UI", 10F),
-                TabStop = false,
-                Cursor = Cursors.Hand,
-            };
             copyBtn.Click += delegate
             {
                 try
                 {
                     Clipboard.SetText(_machine);
                     copyBtn.Text = "已复制";
+                    copyBtn.ForeColor = ok;
                     var timer = new System.Windows.Forms.Timer { Interval = 1600 };
                     timer.Tick += delegate(object s2, EventArgs e2)
                     {
                         ((System.Windows.Forms.Timer)s2).Stop();
                         copyBtn.Text = "复制";
+                        copyBtn.ForeColor = textPri;
                     };
                     timer.Start();
                 }
                 catch (Exception ex) { SetStatus("复制失败：" + ex.Message, true); }
             };
-            machineCard.Controls.AddRange(new Control[] { machineIcon, machineLabel, helpIcon, machineField, copyBtn });
+            machineCard.Controls.AddRange(new Control[] { machineIcon, machineLabel, machineField, copyBtn });
 
-            // ---- 卡片 2：授权码 ----
+            // ---- 产品密钥区块 ----
+            const int CODE_Y = CARD_Y + CARD_H + GAP;
             var codeCard = new GlassCard
             {
-                Radius = CARD_R, Fill = cardFill, Border = cardBorder,
-                Bounds = new Rectangle(44, 258, 552, 100),
+                Radius = R_CARD, Fill = surface, Border = borderSoft,
+                Bounds = new Rectangle(PAD, CODE_Y, W - PAD * 2, CARD_H),
             };
             var codeIcon = new IconBox
             {
-                Kind = "key", Stroke = accentHi,
-                Bounds = new Rectangle(22, 26, 24, 24),
+                Kind = "key", Stroke = textSec, StrokeWidth = 1.5f, BgColor = surface,
+                Bounds = new Rectangle(20, 20, 18, 18),
             };
             var codeLabel = new Label
             {
-                Text = "授权码",
-                ForeColor = textHi,
-                Font = new Font("Microsoft YaHei UI", 11F, FontStyle.Bold),
-                Bounds = new Rectangle(58, 24, 120, 26),
-                BackColor = Color.Transparent,
+                Text = "产品密钥",
+                ForeColor = textSec,
+                Font = new Font("Microsoft YaHei UI", 9F),
+                Bounds = new Rectangle(46, 19, 140, 20),
+                BackColor = surface,
             };
             var codeShell = new FieldShell
             {
-                Radius = EL_R,
-                Bounds = new Rectangle(54, 54, 474, 34),
-                BackColor = slotFill,
-                BorderColor = slotBorder,
-                FocusBorderColor = accentHi,
-                Placeholder = "请输入授权码",
+                Radius = R_CTRL,
+                Bounds = new Rectangle(20, 46, codeCard.Width - 20 * 2, 38),
+                BackColor = surfaceHi,
+                BorderColor = borderSub,
+                FocusBorderColor = brandA,
+                Placeholder = "将管理员提供的密钥粘贴到这里",
             };
-            codeShell.Inner.BackColor = slotFill;      // 同上：不设会露出系统白底
-            codeShell.Inner.Font = new Font("Consolas", 11F);
-            codeShell.Inner.ForeColor = textHi;
+            codeShell.Inner.BackColor = surfaceHi;
+            codeShell.Inner.Font = new Font("Consolas", 11.5F);
+            codeShell.Inner.ForeColor = textPri;
             _input = codeShell.Inner;
             codeCard.Controls.AddRange(new Control[] { codeIcon, codeLabel, codeShell });
 
-            // ---- 状态提示（出错才显示）----
+            // ---- 状态提示（出错/成功才显示）----
             _status = new Label
             {
                 Text = _reason.Length > 0 ? _reason : "",
                 ForeColor = danger,
                 Font = new Font("Microsoft YaHei UI", 9F),
-                Bounds = new Rectangle(44, 366, 552, 20),
-                BackColor = Color.Transparent,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Bounds = new Rectangle(PAD + 2, CODE_Y + CARD_H + 8, W - PAD * 2, 20),
+                BackColor = bgPage,
             };
 
-            // ---- 底部按钮 ----
+            // ---- 底部按钮（右对齐，主按钮最右，与卡片右边缘对齐）----
+            const int BTN_Y = H - 66;
+            const int BTN_H = 42;
+            const int BTN_PRIMARY_W = 132;
+            const int BTN_SUB_W = 88;
+            const int BTN_GAP = 10;
+            int btnRight = PAD + (W - PAD * 2);   // = W - PAD，卡片右边缘
             _activate = new RoundedButton
             {
-                Radius = 12,
+                Radius = R_CTRL,
                 Text = "激活",
-                Bounds = new Rectangle(374, 392, 138, 44),
-                GradientFrom = Color.FromArgb(0x7C, 0x5C, 0xD6),
-                GradientTo = Color.FromArgb(0xA7, 0x8B, 0xFA),
+                Bounds = new Rectangle(btnRight - BTN_PRIMARY_W, BTN_Y, BTN_PRIMARY_W, BTN_H),
+                GradientFrom = brandA,
+                GradientTo = brandB,
                 ForeColor = Color.White,
-                Font = new Font("Microsoft YaHei UI", 11.5F, FontStyle.Bold),
+                Font = new Font("Microsoft YaHei UI", 10.5F, FontStyle.Bold),
                 TabStop = false,
                 Cursor = Cursors.Hand,
             };
@@ -913,21 +1270,22 @@ public LicenseForm(string machine, string reason)
 
             _exitButton = new RoundedButton
             {
-                Radius = 12,
+                Radius = R_CTRL,
                 Text = "取消",
-                Bounds = new Rectangle(522, 392, 74, 44),
-                BackColor = Color.FromArgb(0x28, 0x20, 0x46),
-                ForeColor = Color.FromArgb(0xC8, 0xC0, 0xE0),
-                BorderColor = Color.FromArgb(0x45, 0x3A, 0x70),
-                Font = new Font("Microsoft YaHei UI", 10.5F),
+                Bounds = new Rectangle(btnRight - BTN_PRIMARY_W - BTN_GAP - BTN_SUB_W, BTN_Y, BTN_SUB_W, BTN_H),
+                BackColor = surface,
+                ForeColor = textSec,
+                BorderColor = borderSub,
+                Font = new Font("Microsoft YaHei UI", 10F),
                 TabStop = false,
                 Cursor = Cursors.Hand,
                 DialogResult = DialogResult.Cancel,
             };
 
             Controls.Add(backdrop);
-            backdrop.Controls.AddRange(new Control[] { closeIcon, logo, brand, brandSub,
-                                                       machineCard, codeCard, _status, _activate, _exitButton });
+            backdrop.Controls.AddRange(new Control[] { closeBtn, logo, brand, brandSub,
+                                                       machineCard, codeCard, _status,
+                                                       _exitButton, _activate });
             AcceptButton = _activate;
             CancelButton = _exitButton;
             Shown += delegate { _input.Focus(); };
