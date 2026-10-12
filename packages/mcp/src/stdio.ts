@@ -45,7 +45,7 @@ async function main() {
   const transport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers: { Authorization: `Bearer ${token}`, "Accept-Language": locale } },
   });
-  const client = new Client({ name: "toonflow-stdio", version: "0.0.0" });
+  const client = new Client({ name: "jinyutv-stdio", version: "0.0.0" });
   await client.connect(transport);
   if (!client.getServerCapabilities()?.tools) {
     await client.close();
@@ -53,7 +53,7 @@ async function main() {
   }
   const bridge = serveStdio(() => {
     const resources = client.getServerCapabilities()?.resources;
-    const server = new McpServer({ name: "toonflow", version: "0.0.0" }, {
+    const server = new McpServer({ name: "jinyutv", version: "0.0.0" }, {
       capabilities: { tools: { listChanged: false }, ...(resources ? { resources: { subscribe: false, listChanged: false } } : {}) },
       instructions: client.getInstructions(),
     });
