@@ -546,6 +546,12 @@ class JinyuTVLauncher
     class HoverCircle : Panel
     {
         public Color HoverFill = Color.FromArgb(0x28, 0x28, 0x2C);
+        /// <summary>
+        /// 不悬停时要铺的底色。**必须由调用方显式指定**（如 bgPage=纯黑），
+        /// 不能用 Parent.BackColor：父级若是另一个透明控件，取到的是 alpha=0，
+        /// 会退回硬编码深灰，在纯黑底上浮出一个方块。
+        /// </summary>
+        public Color BgColor = Color.FromArgb(0x11, 0x11, 0x13);
         bool _hover;
 
         public HoverCircle()
@@ -570,15 +576,15 @@ class JinyuTVLauncher
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             if (Width <= 1 || Height <= 1) return;
-            var parentBg = (Parent != null) ? Parent.BackColor : Color.FromArgb(0x11, 0x11, 0x13);
-            if (parentBg.A == 0) parentBg = Color.FromArgb(0x11, 0x11, 0x13);
-            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            if (!_hover)
+            Color parentBg = BgColor;
+            if (parentBg.A == 0)
             {
-                using (var br = new SolidBrush(parentBg)) e.Graphics.FillRectangle(br, 0, 0, Width, Height);
-                return;
+                parentBg = (Parent != null) ? Parent.BackColor : Color.FromArgb(0x11, 0x11, 0x13);
+                if (parentBg.A == 0) parentBg = Color.FromArgb(0x11, 0x11, 0x13);
             }
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             using (var br0 = new SolidBrush(parentBg)) e.Graphics.FillRectangle(br0, 0, 0, Width, Height);
+            if (!_hover) return;
             using (var path = Rounded.Rect(new RectangleF(0, 0, Width - 1, Height - 1), Math.Min(Width, Height) / 2))
             using (var br = new SolidBrush(HoverFill))
                 e.Graphics.FillPath(br, path);
@@ -833,8 +839,17 @@ class JinyuTVLauncher
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             if (Width <= 0 || Height <= 0) return;
-            Color bg = (Parent != null) ? Parent.BackColor : Color.FromArgb(0x11, 0x11, 0x13);
-            if (bg.A == 0) bg = Color.FromArgb(0x11, 0x11, 0x13);
+            // ⚠️ 一律用调用方显式传入的 BgColor，**不要**回头去取 Parent.BackColor：
+            //    IconBox 的父级常常是 HoverCircle（它的 BackColor 是 Transparent，
+            //    Alpha=0），取到 alpha=0 后会退回一个硬编码深灰 —— 结果是在纯黑底上
+            //    围绕叉号浮出一个比背景亮的方块（用户截图里关闭按钮那块就是）。
+            //    BgColor 由调用方按实际画面色指定（如 bgPage=纯黑），才能严丝合缝。
+            Color bg = BgColor;
+            if (bg.A == 0)
+            {
+                bg = (Parent != null) ? Parent.BackColor : Color.FromArgb(0x11, 0x11, 0x13);
+                if (bg.A == 0) bg = Color.FromArgb(0x11, 0x11, 0x13);
+            }
             using (var br = new SolidBrush(bg)) e.Graphics.FillRectangle(br, 0, 0, Width, Height);
         }
 
@@ -988,8 +1003,10 @@ public LicenseForm(string machine, string reason)
             // ==================================================================
             //  设计令牌（Design Tokens）
             //
-            //  全部取自软件本体 Element Plus 深色主题的真实变量，不再自创紫色：
-            //    --el-bg-color-page:      #0a0a0a
+            //  底色 = **纯黑 #000000**，与 logo 图片自身的黑底（logo.png 众数色
+            //  实测为 (0,0,0)）完全一致 —— 这样圆盘 logo 与窗体融为一体，
+            //  不会在 logo 四周看到一个"深灰方块"。
+            //  其余面/描边/文字取自软件本体 Element Plus 深色主题的真实变量：
             //    --el-bg-color:           #141414
             //    --el-bg-color-overlay:   #1d1e1f
             //    --el-fill-color-light:   #262727
@@ -999,11 +1016,11 @@ public LicenseForm(string machine, string reason)
             //  这样弹窗与主界面**同源**，不再有"跟软件不搭"的问题。
             // ==================================================================
             // —— 中性色阶 ——
-            Color bgPage = Color.FromArgb(0x11, 0x11, 0x12);   // 窗体底（比 page 略暖，避免纯黑发灰）
-            Color surface = Color.FromArgb(0x1A, 0x1A, 0x1C);  // 卡片面
-            Color surfaceHi = Color.FromArgb(0x22, 0x22, 0x25); // 卡片内嵌槽
-            Color borderSub = Color.FromArgb(0x2E, 0x2E, 0x32);  // 常规描边
-            Color borderSoft = Color.FromArgb(0x26, 0x26, 0x29); // 弱描边
+            Color bgPage = Color.FromArgb(0x00, 0x00, 0x00);   // 窗体底＝纯黑（对齐 logo 黑底）
+            Color surface = Color.FromArgb(0x14, 0x14, 0x14);  // 卡片面
+            Color surfaceHi = Color.FromArgb(0x1D, 0x1D, 0x1D); // 卡片内嵌槽
+            Color borderSub = Color.FromArgb(0x30, 0x30, 0x30);  // 常规描边
+            Color borderSoft = Color.FromArgb(0x28, 0x28, 0x28); // 弱描边
             // —— 文本色阶 ——
             Color textPri = Color.FromArgb(0xE8, 0xE8, 0xEC);
             Color textSec = Color.FromArgb(0x9A, 0x9A, 0xA2);
@@ -1015,14 +1032,16 @@ public LicenseForm(string machine, string reason)
             Color danger = Color.FromArgb(0xF0, 0x7A, 0x7A);
             // —— 间距令牌（8pt 栅格）——
             const int PAD = 36;          // 窗体左右内边距
-            const int GAP = 14;          // 区块间距
-            // —— 圆角令牌 ——
-            const int R_WINDOW = 16;
-            const int R_CARD = 12;
-            const int R_CTRL = 9;
+            const int GAP = 16;          // 区块间距
+            // —— 圆角令牌（用户要求"整个弹窗圆角大一点"）——
+            const int R_WINDOW = 24;     // 窗体圆角（原 16）
+            const int R_CARD = 16;       // 卡片圆角（原 12）
+            const int R_CTRL = 12;       // 控件圆角（原 9）
 
             const int W = 620;
-            const int H = 496;
+            // 高度 +44：产品密钥框加高(+18) + 底部按钮呼吸空间(+26)
+            const int H = 540;
+
 
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.None;
@@ -1036,12 +1055,16 @@ public LicenseForm(string machine, string reason)
             KeyPreview = true;
             MakeRounded(this, R_WINDOW);
 
-            // ---- 背景：纯深色 + 顶部极淡品牌晕染（不是渐变背景）----
+            // ---- 背景：纯黑（与 logo 黑底一致，完全不要光晕）----
+            // ⚠️ 光晕必须关掉：只要顶右角有一层紫色晕染，右上角的关闭按钮
+            //    （自绘控件必须自己铺底）就会用纯黑填出**比周围更暗的方块**，
+            //    在截图里非常明显。用户明确要求"不要渐变背景，就深色背景"，
+            //    所以这里是彻底的纯黑，四周同色，任何子控件铺底都不会有色差。
             var backdrop = new FlatPanel
             {
                 Bounds = new Rectangle(0, 0, W, H),
                 Fill = bgPage,
-                Glow = true,
+                Glow = false,
                 BackColor = bgPage,
             };
             backdrop.MouseDown += delegate { DragWindow(); };
@@ -1053,6 +1076,7 @@ public LicenseForm(string machine, string reason)
             {
                 Bounds = new Rectangle(W - 52, 18, 34, 34),
                 Cursor = Cursors.Hand,
+                BgColor = bgPage,   // 纯黑，与窗体底一致 → 不悬停时完全隐形
             };
             var closeIcon = new IconBox
             {
@@ -1103,7 +1127,9 @@ public LicenseForm(string machine, string reason)
 
             // ---- 机器码区块 ----
             const int CARD_Y = 196;
-            const int CARD_H = 104;
+            const int CARD_H = 110;
+            const int FIELD_H = 44;      // 用户要求"产品密钥高度高一点"→ 输入框统一加高
+            const int FIELD_PAD = 18;    // 卡片内左右内边距
             var machineCard = new GlassCard
             {
                 Radius = R_CARD, Fill = surface, Border = borderSoft,
@@ -1112,29 +1138,31 @@ public LicenseForm(string machine, string reason)
             var machineIcon = new IconBox
             {
                 Kind = "monitor", Stroke = textSec, StrokeWidth = 1.5f, BgColor = surface,
-                Bounds = new Rectangle(20, 20, 18, 18),
+                Bounds = new Rectangle(FIELD_PAD + 2, 20, 18, 18),
             };
             var machineLabel = new Label
             {
                 Text = "本机机器码",
                 ForeColor = textSec,
                 Font = new Font("Microsoft YaHei UI", 9F),
-                Bounds = new Rectangle(46, 19, 140, 20),
+                Bounds = new Rectangle(FIELD_PAD + 28, 19, 140, 20),
                 // Label 是不透明原生控件，底色必须等于卡片实际画出的面色(surface)，
                 // 否则会在卡片上留下一个色差小方块
                 BackColor = surface,
             };
+            const int COPY_W = 92;
+            const int COPY_GAP = 10;
+            int fieldW = machineCard.Width - FIELD_PAD * 2 - COPY_W - COPY_GAP;
             var machineField = new FieldShell
             {
                 Radius = R_CTRL,
-                // 宽度 = 卡片宽 - 左右内边距 - 复制按钮宽 - 中间间隙(10)
-                Bounds = new Rectangle(20, 46, machineCard.Width - 20 * 2 - 92 - 10, 38),
+                Bounds = new Rectangle(FIELD_PAD, 46, fieldW, FIELD_H),
                 BackColor = surfaceHi,
                 BorderColor = borderSub,
                 FocusBorderColor = brandA,
             };
             machineField.Inner.BackColor = surfaceHi;   // TextBox 不继承父容器底色
-            machineField.Inner.Font = new Font("Consolas", 12.5F);
+            machineField.Inner.Font = new Font("Consolas", 13F);
             machineField.Inner.ForeColor = textPri;
             machineField.Inner.ReadOnly = true;
             machineField.Inner.TabStop = false;
@@ -1145,7 +1173,7 @@ public LicenseForm(string machine, string reason)
             {
                 Radius = R_CTRL,
                 Text = "复制",
-                Bounds = new Rectangle(machineCard.Width - 20 - 92, 46, 92, 38),
+                Bounds = new Rectangle(FIELD_PAD + fieldW + COPY_GAP, 46, COPY_W, FIELD_H),
                 BackColor = surfaceHi,
                 ForeColor = textPri,
                 BorderColor = borderSub,
@@ -1158,7 +1186,7 @@ public LicenseForm(string machine, string reason)
             var copyGlyph = new IconBox
             {
                 Kind = "copy", Stroke = textSec, StrokeWidth = 1.4f, BgColor = surfaceHi,
-                Bounds = new Rectangle(16, 11, 15, 15),
+                Bounds = new Rectangle(16, (FIELD_H - 15) / 2, 15, 15),
             };
             copyGlyph.Enabled = false;
             copyBtn.Controls.Add(copyGlyph);
@@ -1211,27 +1239,27 @@ public LicenseForm(string machine, string reason)
             var codeIcon = new IconBox
             {
                 Kind = "key", Stroke = textSec, StrokeWidth = 1.5f, BgColor = surface,
-                Bounds = new Rectangle(20, 20, 18, 18),
+                Bounds = new Rectangle(FIELD_PAD + 2, 20, 18, 18),
             };
             var codeLabel = new Label
             {
                 Text = "产品密钥",
                 ForeColor = textSec,
                 Font = new Font("Microsoft YaHei UI", 9F),
-                Bounds = new Rectangle(46, 19, 140, 20),
+                Bounds = new Rectangle(FIELD_PAD + 28, 19, 140, 20),
                 BackColor = surface,
             };
             var codeShell = new FieldShell
             {
                 Radius = R_CTRL,
-                Bounds = new Rectangle(20, 46, codeCard.Width - 20 * 2, 38),
+                Bounds = new Rectangle(FIELD_PAD, 46, codeCard.Width - FIELD_PAD * 2, FIELD_H),
                 BackColor = surfaceHi,
                 BorderColor = borderSub,
                 FocusBorderColor = brandA,
                 Placeholder = "将管理员提供的密钥粘贴到这里",
             };
             codeShell.Inner.BackColor = surfaceHi;
-            codeShell.Inner.Font = new Font("Consolas", 11.5F);
+            codeShell.Inner.Font = new Font("Consolas", 12F);
             codeShell.Inner.ForeColor = textPri;
             _input = codeShell.Inner;
             codeCard.Controls.AddRange(new Control[] { codeIcon, codeLabel, codeShell });
@@ -1243,13 +1271,16 @@ public LicenseForm(string machine, string reason)
                 ForeColor = danger,
                 Font = new Font("Microsoft YaHei UI", 9F),
                 TextAlign = ContentAlignment.MiddleLeft,
-                Bounds = new Rectangle(PAD + 2, CODE_Y + CARD_H + 8, W - PAD * 2, 20),
+                Bounds = new Rectangle(PAD + 2, CODE_Y + CARD_H + 6, W - PAD * 2, 20),
                 BackColor = bgPage,
             };
 
             // ---- 底部按钮（右对齐，主按钮最右，与卡片右边缘对齐）----
-            const int BTN_Y = H - 66;
-            const int BTN_H = 42;
+            // ⚠️ 用 BOTTOM_RESERVE 从窗体底往上算，不用固定 H-66 ——
+            //    固定值在改窗体高度后会把按钮顶到边缘（上一版"激活/取消被压在下面"就是这个）。
+            const int BTN_H = 44;
+            const int BOTTOM_RESERVE = 34;   // 按钮下沿到窗体底的距离
+            const int BTN_Y = H - BOTTOM_RESERVE - BTN_H;
             const int BTN_PRIMARY_W = 132;
             const int BTN_SUB_W = 88;
             const int BTN_GAP = 10;
