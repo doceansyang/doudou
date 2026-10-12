@@ -1,8 +1,8 @@
 import type { GenerateMedia, MediaAsset, VideoRequest } from "@toonflow/providers";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { ACCOUNT_PLATFORMS, normalizeAccountType, type AccountType } from "./doubao-accounts.ts";
 
 /**
@@ -122,8 +122,28 @@ const MEDIA_HOSTS = [
   "dola.com",
 ];
 
+/**
+ * 诊断日志。
+ *
+ * ⚠️ **必须同时落盘**，不能只 console.log。
+ *    RPA 服务是用 CREATE_NO_WINDOW 无窗口拉起的，stdout 直接丢弃 ——
+ *    于是本文件里最关键的几句判定（`已切换模型：X` / `未找到点名型号，已选用页面上的
+ *    Seedance 型号` / `沿用当前模型：X`）从来没有任何记录。用户报
+ *    「我选了 mini，怎么还是用 fast 生成」时，翻遍日志也查不出走的哪条分支
+ *    （2026-10-12 实际踩过，只能靠猜）。
+ *
+ * 写盘失败绝不能影响生成主流程，所以整体 try/catch 吞掉；
+ * 用同步写是为了保证多行日志的顺序（异步追加会交错、把行切碎）。
+ */
+const LOG_FILE = resolve(process.cwd(), "assets", "doubao-rpa.log");
+
 function log(message: string): void {
-  console.log(`[doubaoAccount] ${message}`);
+  const line = `[${new Date().toISOString()}] [doubaoAccount] ${message}`;
+  console.log(line);
+  try {
+    mkdirSync(dirname(LOG_FILE), { recursive: true });
+    appendFileSync(LOG_FILE, line + "\n", "utf-8");
+  } catch { /* 记日志失败不影响生成 */ }
 }
 
 /* ------------------------------------------------------------------ 通用工具 */
@@ -1198,7 +1218,17 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     await openNewConversation(page);
     log("进入视频生成模式…");
     await openVideoCreation(page);
-    await selectModel(page, "Seedance 2.0 Fast");
+
+    // ⚠️⚠️ 这里必须传 **request.model**（画布上用户真正选的那个型号），不能写死。
+    //    原来写死成 "Seedance 2.0 Fast"，于是用户在画布上选 Mini / 2.0 也一律
+    //    按 Fast 生成 —— 而 selectModel() 里那套「按点名型号去下拉里切」的逻辑
+    //    等于白写（函数的注释还在说"画布侧可能传 Seedance 2.0 Fast"，根本没传）。
+    //    2026-10-12 用户报「我选的 mini，怎么还是用 fast 生成」就是这一处。
+    const wantedModel = String(request.model || "Seedance 2.0 Fast");
+    await selectModel(page, wantedModel);
+    // 记下**实际**落到的型号：selectModel 是尽力而为，切不到会沿用页面当前值，
+    // 不记这一行就永远说不清"这次到底用了哪个型号"（本次排查就吃了这个亏）。
+    log(`本次型号：请求「${wantedModel}」，页面实际「${(await currentModelLabel(page)) || "未知"}」`);
 
     const files = (request.images ?? [])
       .map((image: any, index: number) => toUploadFile(image, index))
