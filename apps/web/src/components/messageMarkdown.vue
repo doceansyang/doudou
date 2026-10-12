@@ -70,7 +70,12 @@ const chunks = computed(() => {
     --muted: var(--el-fill-color-light);
     --muted-foreground: var(--el-text-color-secondary);
     --border: var(--el-border-color-lighter);
-    --primary: var(--el-color-primary);
+    // ⚠️ 链接色绑的是 --primary。原来直接给 --el-color-primary，而本项目主色是近黑的
+    //    #171717 —— 深色主题下链接就渲染成黑字，在 #141414 的底上对比度只有 1.03:1，
+    //    等于看不见（供应商说明里的「注册链接」整行消失）。
+    //    改绑 --ui-brand-foreground：那是 App.vue 按主题算好的「可读品牌色」
+    //    （深色下近黑主色会被提亮成浅灰，浅色下原样保留深色）→ 随主题自动适配。
+    --primary: var(--ui-brand-foreground, var(--el-color-primary));
     font-size: inherit;
     line-height: inherit;
 

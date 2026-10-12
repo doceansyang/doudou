@@ -26,7 +26,7 @@ page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + 
 // 404 要知道**是哪个 URL**：只说"有个资源 404"等于没说
 page.on("response", (r) => { if (r.status() >= 400) errors.push(`HTTP ${r.status()} ${r.url()}`); });
 
-await page.goto("http://127.0.0.1:3000/", { waitUntil: "domcontentloaded" });
+await page.goto("http://127.0.0.1:3000/#/home", { waitUntil: "domcontentloaded" });
 
 // 从首页点进项目 → 才会进工作区
 const entry = page.locator(".projectEntry").first();

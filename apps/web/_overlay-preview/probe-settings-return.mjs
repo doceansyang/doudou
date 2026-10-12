@@ -19,7 +19,7 @@ page.on("pageerror", (e) => errors.push(String(e)));
 // 点 target=_blank 会开新标签；这里只是不想留一个挂在登录页的窗口
 page.on("popup", (p) => { void p.close().catch(() => {}); });
 
-await page.goto("http://127.0.0.1:3000/", { waitUntil: "domcontentloaded" });
+await page.goto("http://127.0.0.1:3000/#/home", { waitUntil: "domcontentloaded" });
 const entry = page.locator(".projectEntry").first();
 await entry.waitFor({ state: "visible", timeout: 20000 });
 await entry.click();

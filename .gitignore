@@ -73,3 +73,16 @@ scripts/_c_old.txt
 scripts/_c_new.txt
 scripts/_*.txt
 scripts/launcher.cs.bak-*
+
+# 含服务器凭据 / 服务器地址的部署脚本，绝不入库
+# （通用部署方案见 tools/plugin-forwarder/deploy/，那份是可公开的、不含凭据）
+/scripts/_probe-server-check.py
+/scripts/_deploy-plugin-forwarder.py
+/scripts/_deploy-forwarder-fix.py
+/scripts/_deploy-path-prefix.py
+/scripts/_deploy-token.py
+/scripts/_server.py
+
+# 本地构建与探针产物
+/_build-cache/
+/apps/scripts/_out/

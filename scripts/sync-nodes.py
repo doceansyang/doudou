@@ -22,8 +22,9 @@ import subprocess
 
 PROJECT = "C:/Users/JinYuDream/WorkBuddy/豆包画布开发/toonflow"
 BUN = "C:/Users/JinYuDream/.workbuddy/tools/bun/bun.exe"
-# 判据串：`groupNodeModels` 里的供应商优先级表（产物里是反引号，不是双引号）
-MARKER = "`doubaoAccount`,`JinyuDream`"
+# 复核方式：与项目刚构建出的 build/nodes 逐个比哈希（见 verify()）。
+# 早先这里是「搜产物里的供应商优先级字面量」，但那个串会被压缩器改写/消失，
+# 构建方式一变就稳定误报，已弃用。
 TARGETS = [
     "C:/Users/JinYuDream/WorkBuddy/豆包画布开发/JinyuTV-portable",
     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "JinyuTV"),
@@ -76,21 +77,38 @@ def sync():
             print("    %s/%s/nodes ← %d 个" % (os.path.basename(base), sub, n))
 
 
+def digest(path):
+    """文件内容哈希（前 12 位）。复核用它的原因见 verify()。"""
+    import hashlib
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()[:12]
+
+
 def verify():
-    print("--- 复核（搜内容，不看时间戳）")
+    """复核 = 与「项目 build/nodes 刚构建出来的那份」**逐字节比哈希**。
+
+    为什么不用标记串（原来搜 `groupNodeModels` 里的供应商优先级表）：
+    那个串是**压缩器内联出来的字面量**，构建方式一变（哪怕只改了一行注释影响内联顺序）
+    它就消失了，于是复核「稳定失败」—— 实测被这个坑过一次：新节点其实已经进包
+    （`grep imageRatioMap` 能搜到），但复核报 ✗，白排查一轮。
+    哈希比对既与构建细节无关，又能真正回答「每个位置是不是这份产物」。
+    """
+    print("--- 复核（与项目 build/nodes 逐个比哈希）")
     ok = True
-    check = os.path.join(PROJECT, "build", "nodes", "videoGenerationNode.umd.js")
-    for label, path in [("项目 build/nodes", check)] + [
-        ("%s/%s/nodes" % (os.path.basename(b), s), os.path.join(b, s, "nodes", "videoGenerationNode.umd.js"))
+    src = os.path.join(PROJECT, "build", "nodes")
+    names = [f for f in os.listdir(src) if f.endswith(".umd.js")]
+    want = {name: digest(os.path.join(src, name)) for name in names}
+    for label, dst in [("项目 build/nodes", src)] + [
+        ("%s/%s/nodes" % (os.path.basename(b), s), os.path.join(b, s, "nodes"))
         for b in TARGETS for s in ("build", "data")
     ]:
-        if not os.path.exists(path):
-            print("    ? %s 不存在" % label)
-            continue
-        text = open(path, encoding="utf-8", errors="replace").read()
-        hit = MARKER in text
-        ok = ok and hit
-        print("    %s %s  size=%d" % ("✓" if hit else "✗", label, os.path.getsize(path)))
+        bad = [name for name in names
+               if not os.path.exists(os.path.join(dst, name))
+               or digest(os.path.join(dst, name)) != want[name]]
+        ok = ok and not bad
+        print("    %s %s（%d/%d 一致%s）" % (
+            "✓" if not bad else "✗", label, len(names) - len(bad), len(names),
+            "" if not bad else "，不一致：" + "、".join(bad[:3])))
     return ok
 
 
