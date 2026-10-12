@@ -6,7 +6,13 @@
 //  ③ 设置→隐私面板如实显示「不收集、不上传任何使用数据」，且**没有**那个失效的数据收集开关
 //
 // ⚠️ 只读：不改设置、不装插件。
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+
+const outDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts", "_out");
+mkdirSync(outDir, { recursive: true });
 
 const browser = await chromium.launch({ channel: "chrome" });
 const page = await browser.newPage({ viewport: { width: 1280, height: 1000 }, deviceScaleFactor: 2 });
@@ -83,6 +89,9 @@ check("出站请求零 telemetry / toonflow", bad.length === 0, `共 ${requests.
 // ③ 隐私面板如实说明、且没有失效开关
 check("隐私面板说明不收集数据", /不收集|不上传/.test(panelText), panelText.slice(0, 80));
 check("隐私面板已无失效的数据收集开关", switchCount === 0, `el-switch 数量 = ${switchCount}`);
+
+await page.screenshot({ path: join(outDir, "privacy-telemetry-off.png") });
+console.log(`截图：${join(outDir, "privacy-telemetry-off.png")}`);
 
 await browser.close();
 
