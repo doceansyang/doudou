@@ -3,7 +3,7 @@
     <template #reference>
       <el-button class="settingsButton" text size="small" :disabled="disabled" aria-label="视频生成设置">
         <span class="ratioShape" :style="ratioStyle(ratio)" aria-hidden="true" />
-        <span>{{ [ratio, resolution, duration ? `${duration}秒` : ''].filter(Boolean).join(' · ') }}</span>
+        <span>{{ [ratio, resolution, duration !== undefined ? durationLabel(duration) : ''].filter(Boolean).join(' · ') }}</span>
         <icon-chevron-up :size="14" aria-hidden="true" />
       </el-button>
     </template>
@@ -16,7 +16,7 @@
         <div v-if="durations.length" class="outputField">
           <div class="sectionLabel">时长</div>
           <el-select v-model="duration" :disabled="disabled" :teleported="false" aria-label="视频时长">
-            <el-option v-for="item in durations" :key="item" :value="item" :label="`${item}秒`" />
+            <el-option v-for="item in durations" :key="item" :value="item" :label="durationLabel(item)" />
           </el-select>
         </div>
         <div v-if="resolutions.length" class="outputField">
@@ -71,8 +71,17 @@ function resolutionsFor(value: number | undefined) {
 }
 
 function ratioStyle(value: string) {
+  // `adaptive` 没有宽高比（由上游按输入素材自己定），给它一个固定的小方块。
+  // ⚠️ 不特判的话 `"adaptive".split(":")` 会得到 NaN 宽高，图标会渲染成坏尺寸。
+  if (!/^\d+:\d+$/.test(value)) return { width: "16px", height: "16px" };
   const [width = 1, height = 1] = value.split(":").map(Number);
   return { width: `${16 * Math.min(width / height, 1)}px`, height: `${16 * Math.min(height / width, 1)}px` };
+}
+
+// `-1` 是上游的「自动时长」（Seedance / Wan 3.0 都支持）：由模型按提示词自己决定长度。
+// 直接显示成「-1秒」会很怪，这里翻译成人话。
+function durationLabel(value: number) {
+  return value === -1 ? "自动" : `${value}秒`;
 }
 </script>
 

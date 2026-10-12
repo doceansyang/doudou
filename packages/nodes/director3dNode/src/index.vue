@@ -25,7 +25,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useVueFlow } from "@vue-flow/core";
 import { IconCube3dSphere } from "@tabler/icons-vue";
 import { ElLoading, ElMessage } from "element-plus";
-import { nodeSkeleton, useNode, useNodeFiles, useNodeReferences, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
+import { nodeSkeleton, previewWidth, useNode, useNodeFiles, useNodeReferences, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import sceneEditor from "./sceneEditor.vue";
@@ -210,7 +210,9 @@ async function exportToCanvas(kind: "image" | "video", key: string, aspect: numb
   let stopWatching = () => {};
   let workspaceFiles: ReturnType<typeof files.getWorkspaceFiles> | undefined;
   function addExportNode(label: string) {
-    const width = 240 * aspect + 18;
+    // 导出会新建一个图片节点，宽度按**短边 240** 算（见 previewSize.ts），与节点自身一致，
+    // 否则竖版导出会按 135px 去避让、实际占 240px → 和邻居叠在一起。
+    const width = previewWidth(aspect, 1) + 18;
     const x = node.computedPosition.x + (node.dimensions.width || 320) + 80;
     let y = node.computedPosition.y;
     for (const other of [...getNodes.value].sort((a, b) => a.computedPosition.y - b.computedPosition.y)) {

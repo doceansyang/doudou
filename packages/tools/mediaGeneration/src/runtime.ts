@@ -10,7 +10,16 @@ const imageReference = z.strictObject({ path: relativePath, mimeType: z.string()
 const videoReference = z.strictObject({ path: relativePath, mimeType: z.string().regex(/^video\/[a-z0-9.+-]+$/i) });
 const audioReference = z.strictObject({ path: relativePath, mimeType: z.string().regex(/^audio\/[a-z0-9.+-]+$/i) });
 const sharedFields = {
-  providerId: z.string().regex(/^[a-z][a-zA-Z0-9]{0,95}$/),
+  // ⚠️ 首字母**必须允许大写**。原来是 /^[a-z][a-zA-Z0-9]{0,95}$/，只认小驼峰，
+  //    于是 providerId="JinyuDream"（Linke 的适配器 id，文件名就叫 JinyuDream.ts）
+  //    在**出网之前**就被这里 400 掉，前端只看到「参数错误：无效字符串」——
+  //    表现就是「Linke 的视频/图片模型怎么都用不了」，而网关那边其实好好的
+  //    （同参数直接打 api.linke.link 一切正常）。
+  //    内置适配器里 doubaoAccount 是小写开头，只有 JinyuDream 带大写（apiMart / metaso
+  //    这两支已在早期下线，当时也是小写开头）—— 这正是「别的厂家能用、只有 Linke 不行」的原因。
+  //    这里放宽到「字母开头」，前后端与磁盘上的适配器 id 都不用改（改 id 会打断
+  //    画布节点里已存的 model 值与设置里的 mediaProviderConfigs 键）。
+  providerId: z.string().regex(/^[a-zA-Z][a-zA-Z0-9]{0,95}$/),
   modelId: z.string().trim().min(1).max(256),
   prompt: z.string().trim().min(1).max(100000),
   outputDirectory: relativePath.optional(),

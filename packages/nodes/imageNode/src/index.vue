@@ -8,7 +8,7 @@
     :downloadUrl="previewUrl"
     :downloadName="outputFile?.url.split(/[\\/]/).at(-1)"
     @fullscreen="previewVisible = true"
-    :style="{ width: previewUrl && imageWidth ? `${imageWidth + 18}px` : undefined }">
+    :style="{ width: `${(previewUrl && imageWidth ? imageWidth : PREVIEW_WIDTH_16_9) + 18}px` }">
     <template v-if="editor?.mode" #top><div ref="paintToolbar" /></template>
     <template #topActions>
       <el-button :icon="IconBrush" :disabled="uploading || !previewUrl || gridSplit?.splitting" text title="局部重绘" aria-label="局部重绘" @click.stop="editor?.start('inpaint')">局部重绘</el-button>
@@ -64,7 +64,7 @@
 import { computed, nextTick, ref } from "vue";
 import { IconPhoto, IconUpload, IconTransfer, IconLayoutGrid, IconBrush, IconPencil } from "@tabler/icons-vue";
 import { ElButton, ElImageViewer, ElMessage } from "element-plus";
-import { nodeSkeleton, nodeTools, useNode, z, type NodeHandle, type NodeImageRequest } from "@toonflow/nodes-scaffold/runtime";
+import { nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, useNode, z, type NodeHandle, type NodeImageRequest } from "@toonflow/nodes-scaffold/runtime";
 import imageGridSplit from "@toonflow/nodes-scaffold/imageGridSplit";
 import imageEditor from "@toonflow/nodes-scaffold/imageEditor";
 import imageInpaintPrompt from "@toonflow/nodes-scaffold/imageInpaintPrompt";
@@ -132,8 +132,12 @@ nodeTools.register({
 
 async function resizeImage(event: Event) {
   const image = event.currentTarget as HTMLImageElement;
-  if (!image.naturalWidth || !image.naturalHeight) return;
-  imageWidth.value = 240 * image.naturalWidth / image.naturalHeight;
+  // 预览宽度按**短边 240** 算（见 previewSize.ts）：横版 427×240、竖版 240×427，
+  // 互为倒数的比例面积相等，画布上看着一样大。
+  // ⚠️ 别改回「高固定 240」——那会让 9:16 只剩 135px 宽，被压成一条细长条。
+  const width = previewWidth(image.naturalWidth, image.naturalHeight);
+  if (!width) return;
+  imageWidth.value = width;
   await nextTick();
   updateNodeInternals();
 }
@@ -173,7 +177,9 @@ function showError(error: unknown, fallback: string) {
 
 <style scoped lang="scss">
 .imageContent {
-  min-height: 144px;
+  /* 空状态也按 **16:9 横版**占位：240 = PREVIEW_SHORT_EDGE（见 previewSize.ts），
+     宽度由节点上的 :style 给（PREVIEW_WIDTH_16_9）。出图前后节点一样大，生成动画也铺得开。 */
+  min-height: 240px;
 
   .fileInput {
     display: none;
@@ -181,7 +187,7 @@ function showError(error: unknown, fallback: string) {
 
   .uploadButton {
     width: 100%;
-    height: 144px;
+    height: 240px;
     padding: 0;
     color: var(--el-text-color-placeholder);
 

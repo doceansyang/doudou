@@ -9,6 +9,8 @@ export * from "./nodeInputs";
 export * from "./nodeEvent";
 export * from "./nodeTools";
 export * from "./workspaceFiles";
+export * from "./previewSize";
+export * from "./referenceTags";
 
 export * from "./nodeAi";
 export * from "./nodeFfmpeg";

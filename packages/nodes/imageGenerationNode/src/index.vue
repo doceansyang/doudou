@@ -8,7 +8,7 @@
     :downloadName="outputFile?.url.split(/[\\/]/).at(-1)"
     @fullscreen="previewVisible = true"
     :bottomWidth="660"
-    :style="{ width: previewUrl && imageWidth ? `${imageWidth + 18}px` : undefined }">
+    :style="{ width: `${(previewUrl && imageWidth ? imageWidth : PREVIEW_WIDTH_16_9) + 18}px` }">
     <template v-if="editor?.mode" #top><div ref="paintToolbar" /></template>
     <template #topActions>
       <el-button :icon="IconBrush" :disabled="generating || deleting || uploading || !previewUrl || gridSplit?.splitting" text title="局部重绘" aria-label="局部重绘" @click.stop="editor?.start('inpaint')">局部重绘</el-button>
@@ -20,7 +20,9 @@
     <template #topRightActions>
       <el-button :icon="IconPencil" :disabled="generating || deleting || uploading || !previewUrl || gridSplit?.splitting" text title="标记" aria-label="标记" @click.stop="editor?.start('mark')" />
     </template>
-    <div v-loading="generating || uploading" class="imageContent nopan" :aria-busy="generating || uploading">
+    <!-- uploading 仍是短任务，用转圈就够；generating 动辄一分钟，
+         换成带百分比爬升和动态背景的 genOverlay（与视频节点同一组件，见该组件顶部说明）。 -->
+    <div v-loading="uploading" class="imageContent nopan" :aria-busy="generating || uploading">
       <imageEditor
         v-if="previewUrl"
         ref="editor"
@@ -33,6 +35,11 @@
       <div v-else class="imageEmpty" role="img" aria-label="暂无生成图片">
         <icon-photo-ai :size="48" stroke="1.25" aria-hidden="true" />
       </div>
+      <generationOverlay
+        :active="generating"
+        label="正在生成图片…"
+        done-label="已完成，正在载入…"
+        :tau="20000" />
     </div>
     <template v-if="editor?.mode !== 'mark'" #bottom>
       <el-card class="promptCard" shadow="never" :bodyStyle="{ padding: '14px 16px 12px' }">
@@ -93,12 +100,13 @@
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
 import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElImageViewer } from "element-plus";
 import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconLayoutGrid, IconBrush, IconPencil } from "@tabler/icons-vue";
-import { groupNodeModels, nodeSkeleton, nodeTools, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { applyReferenceTags, groupNodeModels, nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
 import imageGridSplit from "@toonflow/nodes-scaffold/imageGridSplit";
 import imageEditor from "@toonflow/nodes-scaffold/imageEditor";
+import generationOverlay from "@toonflow/nodes-scaffold/generationOverlay";
 import generationSettings from "./components/generationSettings.vue";
 
 defineOptions({
@@ -141,11 +149,20 @@ let generation: Promise<void> | undefined;
 let modelsRequest: Promise<void> | undefined;
 const selectedModel = computed(() => models.value.find((item) => JSON.stringify([item.providerId, item.modelId]) === data.value.model));
 const sizeOptions = computed(() => (selectedModel.value?.imageSizes?.length ? selectedModel.value.imageSizes : ["2K"]));
-const ratioOptions = computed(() => (selectedModel.value?.imageRatios?.length ? selectedModel.value.imageRatios : ["16:9"]));
+// ⚠️ 比例**按当前档位**取，不能只用扁平的 imageRatios：同一模型不同档位支持的比例可能不同
+//    （gpt-image-2 的 1K/2K 有 13 种，4K 只有 8 种）。缺档位表时回退到扁平列表。
+const ratioOptions = computed(() => {
+  const model = selectedModel.value;
+  if (!model) return ["16:9"];
+  const perSize = model.imageRatioMap?.[data.value.size];
+  if (perSize?.length) return perSize;
+  return model.imageRatios?.length ? model.imageRatios : ["16:9"];
+});
 watch(
-  selectedModel,
-  (choice) => {
-    if (!choice) return;
+  // 档位变化也要复查：比例集合跟着档位走，换档后原比例可能不再受支持。
+  [selectedModel, () => data.value.size],
+  () => {
+    if (!selectedModel.value) return;
     // ACT: 现有分辨率使用 K 单位；出现其他单位时再统一换算，未知名称排在数值选项之后。
     if (!sizeOptions.value.includes(data.value.size)) data.value.size = sizeOptions.value.toSorted((left, right) =>
       (Number.parseFloat(left) || Infinity) - (Number.parseFloat(right) || Infinity)
@@ -157,7 +174,9 @@ watch(
 const modelGroups = computed(() => groupNodeModels(models.value));
 const generationPrompt = computed(() =>
   [
-    (editor.value?.mode === "inpaint" ? data.value.inpaintPrompt : data.value.prompt).trim(),
+    // 与视频节点同一套：`{{ref N}}` → 「图片N」。上游（toapis）要求用「图片1 / 视频1 / 音频1」
+    // 指代素材，占位符原样发过去模型看不懂（详见 referenceTags.ts）。
+    applyReferenceTags((editor.value?.mode === "inpaint" ? data.value.inpaintPrompt : data.value.prompt).trim(), refList.value),
     ...refList.value.flatMap((item, index) => (item.dataType === "STRING" && item.value?.trim() ? [`参考 ${index + 1}：\n${item.value.trim()}`] : [])),
   ]
     .filter(Boolean)
@@ -286,8 +305,12 @@ nodeEvent.on("delete", async () => {
 
 async function resizeImage(event: Event) {
   const image = event.currentTarget as HTMLImageElement;
-  if (!image.naturalWidth || !image.naturalHeight) return;
-  imageWidth.value = (240 * image.naturalWidth) / image.naturalHeight;
+  // 预览宽度按**短边 240** 算（见 previewSize.ts）：横版 427×240、竖版 240×427，
+  // 互为倒数的比例面积相等，画布上看着一样大。
+  // ⚠️ 别改回「高固定 240」——那会让 9:16 只剩 135px 宽，被压成一条细长条。
+  const width = previewWidth(image.naturalWidth, image.naturalHeight);
+  if (!width) return;
+  imageWidth.value = width;
   await nextTick();
   updateNodeInternals();
 }
@@ -335,9 +358,11 @@ nodeTools.register({
       : models.value.find((item) => item.providerId === args.providerId && item.modelId === args.modelId);
     if (!choice) throw new Error("请选择 getConfig 返回的有效图片模型");
     const sizes = choice.imageSizes?.length ? choice.imageSizes : ["2K"];
-    const ratios = choice.imageRatios?.length ? choice.imageRatios : ["16:9"];
+    // 比例按**将要生效的那个档位**校验：调用方可能同时改档位与比例，先按新档位取表。
+    const tier = args.size ?? data.value.size;
+    const ratios = choice.imageRatioMap?.[tier]?.length ? choice.imageRatioMap[tier] : choice.imageRatios?.length ? choice.imageRatios : ["16:9"];
     if (args.size !== undefined && !sizes.includes(args.size)) throw new Error(`当前模型不支持分辨率 ${args.size}，可选：${sizes.join("、")}`);
-    if (args.ratio !== undefined && !ratios.includes(args.ratio)) throw new Error(`当前模型不支持比例 ${args.ratio}，可选：${ratios.join("、")}`);
+    if (args.ratio !== undefined && !ratios.includes(args.ratio)) throw new Error(`当前模型在 ${tier} 档不支持比例 ${args.ratio}，可选：${ratios.join("、")}`);
     data.value.model = JSON.stringify([choice.providerId, choice.modelId]);
     if (args.size !== undefined) data.value.size = args.size;
     if (args.ratio !== undefined) data.value.ratio = args.ratio;
@@ -373,14 +398,16 @@ nodeTools.register({
   position: relative;
   display: grid;
   place-items: center;
-  min-height: 144px;
+  /* 空状态也按 **16:9 横版**占位：240 = PREVIEW_SHORT_EDGE（见 previewSize.ts），
+     宽度由节点上的 :style 给（PREVIEW_WIDTH_16_9）。出图前后节点一样大，生成动画也铺得开。 */
+  min-height: 240px;
   overflow: hidden;
   border-radius: var(--el-border-radius-base);
 
   .imageEmpty {
     display: grid;
     place-items: center;
-    min-height: 144px;
+    min-height: 240px;
     color: var(--el-text-color-placeholder);
   }
 

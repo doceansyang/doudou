@@ -41,6 +41,8 @@ const size = defineModel<string>("size", { required: true });
 const ratio = defineModel<string>("ratio", { required: true });
 
 function ratioStyle(value: string) {
+  // 与视频节点同一份防御：`adaptive` 这类非「宽:高」取值不给它 split，否则会渲染出 NaN 尺寸。
+  if (!/^\d+:\d+$/.test(value)) return { width: "16px", height: "16px" };
   const [width = 1, height = 1] = value.split(":").map(Number);
   return { width: `${16 * Math.min(width / height, 1)}px`, height: `${16 * Math.min(height / width, 1)}px` };
 }

@@ -80,6 +80,8 @@ export interface MediaModel {
   mode?: unknown;
   imageSizes?: string[];
   imageRatios?: string[];
+  /** 图片模型「各分辨率档位各支持哪些宽高比」；高档位常收窄比例集合，缺省时节点回退 imageRatios。 */
+  imageRatioMap?: Record<string, string[]>;
   /** 视频模型支持的画面宽高比；由供应商声明，节点据此渲染比例选项。 */
   videoRatios?: string[];
   durationResolutionMap?: { duration: number[]; resolution: string[] }[];

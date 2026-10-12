@@ -8,7 +8,7 @@
     :downloadName="outputFile?.url.split(/[\\/]/).at(-1)"
     @fullscreen="player?.enterFullscreen()"
     :bottomWidth="660"
-    :style="{ width: previewUrl && videoWidth ? `${videoWidth + 18}px` : undefined }">
+    :style="{ width: `${(previewUrl && videoWidth ? videoWidth : PREVIEW_WIDTH_16_9) + 18}px` }">
     <template #topActions>
       <el-button :icon="IconMusic" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('extractAudio')">提取音轨</el-button>
       <el-button :icon="IconLayersSubtract" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('separate')">分离音视频</el-button>
@@ -102,7 +102,7 @@
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
 import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElDropdown, ElDropdownMenu, ElDropdownItem } from "element-plus";
 import { IconCameraAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconMusic, IconLayersSubtract, IconScissors, IconPhotoScan, IconPlayerSkipBack, IconPlayerSkipForward } from "@tabler/icons-vue";
-import { groupNodeModels, nodeSkeleton, nodeTools, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { applyReferenceTags, groupNodeModels, nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import videoPlayer from "@toonflow/nodes-scaffold/videoPlayer";
 import videoActions from "@toonflow/node-video/videoActions";
@@ -208,7 +208,9 @@ watch([selectedModel, () => data.value.duration], ([choice]) => {
 const modelGroups = computed(() => groupNodeModels(models.value));
 const generationPrompt = computed(() =>
   [
-    data.value.prompt.trim(),
+    // `{{ref N}}` 必须换成上游认识的「图片N / 视频N / 音频N」，否则模型看到的是字面的
+    // `{{ref 2}}`，参考图等于没被指认（详见 referenceTags.ts）。
+    applyReferenceTags(data.value.prompt.trim(), refList.value),
     ...refList.value.flatMap((item, index) => (item.dataType === "STRING" && item.value?.trim() ? [`参考 ${index + 1}：\n${item.value.trim()}`] : [])),
   ]
     .filter(Boolean)
@@ -333,16 +335,14 @@ nodeEvent.on("delete", async () => {
 
 async function resizeVideo(event: Event) {
   const video = event.currentTarget as HTMLVideoElement;
-  if (!video.videoWidth || !video.videoHeight) return;
-  // 240 必须与 videoPlayer 的 .videoPreview max-height 一致；
-  // 下限必须与 .videoPlayer 的 min-width 一致 —— 两者相等时，
-  // 框宽与视频宽才严格吻合（视频铺满那个盒子）。
-  // ⚠️ 原来下限是 180：9:16 竖屏按高度换算只有 240×9/16 = 135px，被抬到 180，
-  //    于是两侧各多出 22.5px、露出播放器底色 —— 用户报的"9:16 视频两边有灰边"。
-  //    之前还有人把下限改到 96 但没同步改 CSS 的 min-width，结果 CSS 又把宽度顶回
-  //    180，问题照旧。**这处分寸是 JS 与 CSS 共管的，必须一起改。**
+  // 预览宽度按**短边 240** 算（见 previewSize.ts）：横版 427×240、竖版 240×427，
+  // 互为倒数的比例面积相等，画布上看着一样大。
+  // ⚠️ 别改回「高固定 240」——那会让 9:16 只剩 135px 宽，被压成一条细长条。
+  // 宽度必须与 videoPlayer.vue 的 `.videoPlayer{min-width}` 严格一致（JS/CSS 共管）。
   // +18 是 el-card 自身内边距与边框合计（8px×2 + 1px×2）。
-  videoWidth.value = Math.max(96, (240 * video.videoWidth) / video.videoHeight);
+  const width = previewWidth(video.videoWidth, video.videoHeight);
+  if (!width) return;
+  videoWidth.value = width;
   await nextTick();
   updateNodeInternals();
 }
@@ -451,14 +451,16 @@ nodeTools.register({
   position: relative;
   display: grid;
   place-items: center;
-  min-height: 144px;
+  /* 空状态也按 **16:9 横版**占位：240 = PREVIEW_SHORT_EDGE（见 previewSize.ts），
+     宽度由节点上的 :style 给（PREVIEW_WIDTH_16_9）。出图前后节点一样大，生成动画也铺得开。 */
+  min-height: 240px;
   overflow: hidden;
   border-radius: var(--el-border-radius-base);
 
   .videoEmpty {
     display: grid;
     place-items: center;
-    min-height: 144px;
+    min-height: 240px;
     color: var(--el-text-color-placeholder);
   }
 

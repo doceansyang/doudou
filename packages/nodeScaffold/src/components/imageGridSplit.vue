@@ -61,6 +61,7 @@ import { useNode, useVueFlow, type Node } from "@vue-flow/core";
 import { ElButton, ElInputNumber, ElMessage, ElPopover } from "element-plus";
 import { uploadNodeFile, useNodeFiles } from "../workspaceFiles";
 import { showNodeError } from "../showNodeError";
+import { previewWidth } from "../previewSize";
 
 const props = defineProps<{ src: string; disabled?: boolean; active: boolean }>();
 const { node } = useNode();
@@ -156,7 +157,9 @@ async function splitImage() {
       }
     }
     if (findNode(node.id) !== node || !nodeTypes?.value?.["remote-imageNode"]) throw new Error("画布节点已变化，请重新切分");
-    const tileWidth = Math.ceil(width / columnCount) / Math.floor(height / rowCount) * 240 + 18;
+    // 切出来的每块会新建一个图片节点，宽度按**短边 240** 算（见 previewSize.ts），
+    // 与节点自身一致 —— 否则竖版切块避让会算窄、和邻格重叠。
+    const tileWidth = previewWidth(Math.ceil(width / columnCount), Math.floor(height / rowCount)) + 18;
     const gridWidth = columnCount * (tileWidth + 40) - 40;
     const gridHeight = rowCount * 320 - 20;
     const x = node.computedPosition.x + node.dimensions.width + 80;

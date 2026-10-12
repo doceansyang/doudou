@@ -55,6 +55,7 @@ import { useNode, useVueFlow } from "@vue-flow/core";
 import { ElButton, ElDropdown, ElDropdownMenu, ElDropdownItem, ElMessage, ElPopover, ElSlider } from "element-plus";
 import { IconPlayerPlay, IconPlayerPause, IconVolume, IconVolumeOff, IconPhotoScan, IconPlayerSkipBack, IconPlayerSkipForward } from "@tabler/icons-vue";
 import { useNodeFiles } from "../workspaceFiles";
+import { previewWidth } from "../previewSize";
 
 const { src, label = "节点视频" } = defineProps<{ src: string; label?: string }>();
 const emit = defineEmits<{ loadedmetadata: [event: Event] }>();
@@ -216,7 +217,9 @@ async function captureFrame(command: "current" | "first" | "last") {
     if (findNode(node.id) !== node || !nodeTypes?.value?.["remote-imageNode"]) throw new Error("画布节点已变化，请重新截帧");
     const x = node.computedPosition.x + node.dimensions.width + 40;
     let y = node.computedPosition.y;
-    const width = 240 * canvas.width / canvas.height + 18;
+    // 截帧会新建一个图片节点，宽度必须与节点自己算出来的一致（短边 240，见 previewSize.ts），
+    // 否则竖版帧会按 135px 去避让，实际却占 240px → 和邻居叠在一起。
+    const width = previewWidth(canvas.width, canvas.height) + 18;
     for (const other of [...getNodes.value].sort((a, b) => a.computedPosition.y - b.computedPosition.y)) {
       const position = other.computedPosition;
       if (position.x < x + width && position.x + other.dimensions.width > x && position.y < y + 300 && position.y + other.dimensions.height > y) y = position.y + other.dimensions.height + 24;
@@ -243,11 +246,11 @@ async function captureFrame(command: "current" | "first" | "last") {
 .videoPlayer {
   position: relative;
   width: 100%;
-  // ⚠️ 这个下限**必须与 videoGenerationNode 的 resizeVideo 保持一致**：
-  //    那边算出的宽度是 `max(下限, 240 * 视频宽高比)`，两者不等就会出现
-  //    "框比视频宽" → 视频两侧露出播放器底色（就是用户说的"灰边"）。
-  //    9:16 竖屏按高度换算只有 135px，原来卡在 180 就凭空多出 45px 空隙。
-  min-width: 96px;
+  // ⚠️ 这个下限**必须与 `previewSize.ts` 的 PREVIEW_SHORT_EDGE 保持一致**：
+  //    节点侧算出的宽度是 `短边240 × max(1, 宽高比)`，最小值就是 240。
+  //    这里若更小，视频还没读到元数据的那一瞬，框会比内容宽 → 两侧露出播放器底色
+  //    （翻成老账就是当年那回「9:16 视频两边有灰边」）。**JS 与 CSS 共管，改就一起改。**
+  min-width: 240px;
   container-type: inline-size;
   border-radius: var(--el-border-radius-base);
   background: var(--el-fill-color-darker);
@@ -257,7 +260,11 @@ async function captureFrame(command: "current" | "first" | "last") {
   .videoPreview {
     display: block;
     width: 100%;
-    max-height: 240px;
+    // 高度**不再固定 240**：竖版要按「短边 240」长到 427（9:16 × 240）。
+    // 固定 240 会把它压回 135px 宽的细长条（object-fit:contain 顺带在两侧留出灰边）。
+    // 这里只留一个**极端比例兜底** —— 比 9:19.5 更细长的才会碰到，
+    // 普通竖版里最高的 9:16（427px）完全放得下。
+    max-height: 480px;
     object-fit: contain;
     border-radius: var(--el-border-radius-base);
     pointer-events: none;

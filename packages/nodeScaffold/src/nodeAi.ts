@@ -61,8 +61,8 @@ export type NodeAiTool = {
  * 供应商在模型下拉里的**优先级**（越靠前越优先）。
  *
  * 为什么需要它：分组顺序原本完全跟随服务端返回 —— 而服务端是按**文件名字母序**
- * 读 `data/providers/*.ts` 的，于是顺序变成 apiMart → doubaoAccount → metaso，
- * 豆包（本项目最常用的免费额度通道）被挤到中间，每天都要往下翻。
+ * 读 `data/providers/*.ts` 的（内置只剩 doubaoAccount 与 JinyuDream 两支，
+ * 字母序会把豆包排到官方平台前面），每天都要往下翻。
  *
  * 未列出的供应商排在后面，且彼此仍保持服务端顺序（Array.sort 是稳定排序）。
  * 这个函数视频/图片/音频/文本节点共用，但 `doubaoAccount` 只声明了视频模型，

@@ -24,6 +24,15 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
+/**
+ * 合法的「比例」写法：`16:9` 这类数字比，**外加上游特有的 `adaptive`**。
+ *
+ * ⚠️ `adaptive` 是 Wan 3.0 与 Seedance 2 都支持的一个取值（让上游按输入素材自己挑比例），
+ *    它长得不像比例，早先那条「只认 `数字:数字`」的正则会把它**静默过滤掉** ——
+ *    表现是供应商文件里明明写了、节点下拉里却看不到。凡是比例白名单都走这个常量。
+ */
+const ratioPattern = /^(?:[1-9]\d{0,3}:[1-9]\d{0,3}|adaptive)$/;
+
 function imageOptions(value: unknown, pattern: RegExp) {
   return Array.isArray(value) ? [...new Set(value.filter((item): item is string => typeof item === "string" && item.length <= 64 && item === item.trim() && pattern.test(item)))] : undefined;
 }
@@ -43,12 +52,20 @@ export async function listMediaModels(): Promise<MediaModel[]> {
       durationResolutionMap: model.durationResolutionMap ?? builtIn?.durationResolutionMap,
       audio: model.audio,
       ...(model.type === "video" ? {
-        videoRatios: imageOptions(Array.isArray(model.videoRatios) ? model.videoRatios : builtIn?.videoRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
+        videoRatios: imageOptions(Array.isArray(model.videoRatios) ? model.videoRatios : builtIn?.videoRatios, ratioPattern),
       } : {}),
       ...(model.type === "audio" ? { voices: model.voices } : {}),
       ...(model.type === "image" ? {
         imageSizes: imageOptions(Array.isArray(model.imageSizes) ? model.imageSizes : builtIn?.imageSizes, /^[^\u0000-\u001f\u007f]+$/),
-        imageRatios: imageOptions(Array.isArray(model.imageRatios) ? model.imageRatios : builtIn?.imageRatios, /^[1-9]\d{0,3}:[1-9]\d{0,3}$/),
+        imageRatios: imageOptions(Array.isArray(model.imageRatios) ? model.imageRatios : builtIn?.imageRatios, ratioPattern),
+        // 按档位的比例表同样以**内置声明**为准（磁盘上那份被自动刷新重写后可能只剩 id）。
+        // 只保留「档位名非空 + 比例数组非空」的项，比例本身走与 imageRatios 相同的正则。
+        imageRatioMap: Object.fromEntries(
+          Object.entries(record(model.imageRatioMap ?? builtIn?.imageRatioMap)).flatMap(([size, ratios]) => {
+            const list = imageOptions(ratios, ratioPattern);
+            return list?.length && size.trim() ? [[size.trim(), list] as const] : [];
+          }),
+        ),
       } : {}),
     } as MediaModel];
   }));
@@ -160,21 +177,29 @@ export async function generateMedia(
   const references = async (items: MediaReference[] | undefined, type: string) => items ? Promise.all(items.map(item => readReference(directory, item, type, signal))) : undefined;
   const images = await references(request.images, "image");
   signal?.throwIfAborted();
-  const assets = mediaType === "audio"
-    ? await provider.generateAudio!({
+  // 生成失败必须留痕。之前的失败只会在前端弹一个提示，服务端日志里**一行都没有**
+  // （express 默认错误处理不打印）——「生成失败到底为什么」完全无法复盘。这里统一落盘，
+  // 带上供应商 / 模型 / 类型，出问题直接看 logs/server.log 即可。
+  const assets = await (mediaType === "audio"
+    ? provider.generateAudio!({
       model: request.modelId, text: request.prompt, images, audios: await references(request.audios, "audio"),
       voice: request.voice, speed: request.speed, volume: request.volume, pitch: request.pitch, language: request.language, format: request.format, sampleRate: request.sampleRate,
     })
     : mediaType === "image"
-    ? await provider.generateImage!({ model: request.modelId, prompt: request.prompt, images, ratio: request.ratio, size: request.size })
-    : await provider.generateVideo!({
+    ? provider.generateImage!({ model: request.modelId, prompt: request.prompt, images, ratio: request.ratio, size: request.size })
+    : provider.generateVideo!({
       model: request.modelId, prompt: request.prompt, images,
       videos: await references(request.videos, "video"), audios: await references(request.audios, "audio"),
       firstFrame: request.firstFrame ? await readReference(directory, request.firstFrame, "image", signal) : undefined,
       lastFrame: request.lastFrame ? await readReference(directory, request.lastFrame, "image", signal) : undefined,
       ratio: request.ratio, resolution: request.resolution, duration: request.duration,
       generateAudio: request.generateAudio, mode: request.mode,
-    });
+    })
+  ).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[媒体生成] 失败：${providerInfo.id}/${request.modelId}（${mediaType}）→ ${message}`);
+    throw error;
+  });
   if (!Array.isArray(assets) || !assets.length) invalid("供应商未返回生成结果");
   const written: string[] = [];
   const result: GeneratedMedia[] = [];

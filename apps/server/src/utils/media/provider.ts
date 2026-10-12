@@ -9,6 +9,7 @@ import { parse, parseExpression } from "@babel/parser";
 import { z } from "zod";
 import conf from "@/utils/conf";
 import { convertAudio } from "@/utils/media/audioProcessor";
+import { inferModelType } from "@/utils/media/modelType";
 import { createWorkspaceFfmpeg } from "@/utils/ffmpeg";
 import { lockWorkspaceFiles, writeWorkspaceFile } from "@/utils/workspace/files";
 
@@ -315,8 +316,14 @@ export async function refreshMediaProviderModels(fileName: string, revision?: st
     //    原来是 `model.type ?? (requestedType ?? previous?.type)`，把 URL 参数置于本地分类之前，
     //    后果：每次按 ?type=video 刷新时，文本模型 deepseek-flash、图片模型 gpt-image-2
     //    统统被贴上 video 标签，直接出现在**视频节点**的模型下拉里（用户看到的"乱放"就是这个）。
-    const type = model.type ?? previous?.type ?? (requestedType.success ? requestedType.data : undefined);
-    // 没有分类依据就**跳过**，不要猜：宁可这个模型暂时不出现，也不能让文本模型出现在视频节点里。
+    // ⚠️ 优先级：**网关显式声明 → 本地已知分类 → 自动归类 → URL 的 type 参数**。
+    //    · 原来把 URL 参数排在本地分类之前，后果是按 ?type=video 刷新时文本模型
+    //      deepseek-flash、图片模型 gpt-image-2 统统被贴上 video 标签，直接出现在
+    //      **视频节点**的模型下拉里（用户看到的"乱放"就是这个）。
+    //    · `inferModelType` 是后加的：网关以后一直加模型，但只给 id，
+    //      靠「接口能力标记 + 模型名语义词」自动归类，不必每次都改本地清单。
+    const type = model.type ?? previous?.type ?? inferModelType(id, model) ?? (requestedType.success ? requestedType.data : undefined);
+    // 仍然分不出类型就**跳过**，不要猜：宁可它暂时不出现，也不能让文本模型出现在视频节点里。
     if (!type) {
       unknown.push(id);
       return [];
@@ -328,8 +335,10 @@ export async function refreshMediaProviderModels(fileName: string, revision?: st
       ?? (typeof model.display_name === "string" ? model.display_name : typeof model.displayName === "string" ? model.displayName : id), type }];
   });
   if (unknown.length) {
-    if (!models.length) invalid(t`以下模型缺少类型声明，无法归类：${unknown.join("、")}`);
-    console.warn(`[media] ${provider.id} 有 ${unknown.length} 个模型无法归类，已跳过：${unknown.join("、")}`);
+    // 归类不出来的多半是**新模型**或纯文本模型。提示要可操作：编辑模型时手工指定类型即可收录。
+    const list = unknown.join("、");
+    if (!models.length) invalid(t`以下模型无法自动归类，请在「编辑模型」里指定类型：${list}`);
+    console.warn(`[media] ${provider.id} 有 ${unknown.length} 个模型无法自动归类，已跳过：${list}（可在「编辑模型」里手工指定类型）`);
   }
   // 一条都没匹配上（例如网关本来就没有该类型的模型）→ 保留原文件，这不算错误。
   //   原来这里会连同 `types` 一起把该类型的老模型全删掉，是另一个静默丢数据的口子。

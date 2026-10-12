@@ -412,7 +412,9 @@ defineExpose({ mode, busy, start, cancel, generate });
   display: grid;
   place-items: center;
 
-  img { display: block; width: 100%; max-height: 240px; object-fit: contain; border-radius: var(--el-border-radius-base); }
+  // max-height 只做**极端比例兜底**（道理同 videoPlayer.vue 里的同名规则，见 previewSize.ts）：
+  // 竖版要按「短边 240」长到 427，卡在 240 会把它压回细长条。
+  img { display: block; width: 100%; max-height: 480px; object-fit: contain; border-radius: var(--el-border-radius-base); }
   .paintCanvas { position: absolute; max-width: 100%; max-height: 100%; height: 100%; touch-action: none; cursor: crosshair; }
   .paintCanvas.inpaint { opacity: 0.55; }
   .textInput { position: absolute; z-index: 1; box-sizing: border-box; padding: 0; border: 1px dashed currentColor; outline: none; resize: none; overflow: hidden; background: rgb(255 255 255 / 85%); font-family: sans-serif; line-height: 1.25; }
