@@ -23,6 +23,7 @@
 用法：
   python scripts/build-installer.py
 """
+import glob
 import json
 import os
 import re
@@ -78,6 +79,9 @@ LICENSE_RUNTIME = ["license-core.ts", "license-bridge.ts"]
 
 # 不打进发行包的名字特征
 SKIP_SUFFIX = (".bak", ".bak2", ".bak3", ".prebuild", ".orig", ".manual", ".empty", ".log")
+
+# data/ 下的开发过程遗留目录（探针备份、旧工作区迁移残留）—— 出厂不带，见 sanitize()
+STALE_DATA_DIRS = ("_probe-archive", "_probe-archive-remove-me", "_workspace-legacy")
 SKIP_NAMES = {"logs", "_junk-backups", ".rebrand-backup"}
 
 
@@ -217,6 +221,27 @@ def sanitize(stage):
                 moved += 1
         os.makedirs(ws, exist_ok=True)
         print("  移除个人画布/素材：%d 项（已移到 _excluded-user-data/，未删除）" % moved)
+
+    # 开发过程遗留：探针备份目录、旧工作区迁移残留、settings 的各种历史副本。
+    # 前两类是 2026-10-13 发 3.0.0 时发现的 —— `_workspace-legacy/` 里还留着
+    # 1.4MB 的生成视频，等于把打包机的私有素材塞进了发行包；`settings.json.pre-linke`
+    # 则是一份**净化前**的设置快照（含打包机绝对路径与旧域名），同样不能出厂。
+    # 用明确名单而不是"所有 _ 开头目录"，避免误伤 data 下将来可能有用的下划线目录。
+    stale_dirs = []
+    for name in STALE_DATA_DIRS:
+        path = os.path.join(stage, "data", name)
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            stale_dirs.append(name)
+    if stale_dirs:
+        print("  移除遗留目录：%s" % "、".join(stale_dirs))
+
+    stale_files = []
+    for name in sorted(glob.glob(os.path.join(stage, "data", "settings.json.*"))):
+        os.remove(name)
+        stale_files.append(os.path.basename(name))
+    if stale_files:
+        print("  移除设置历史副本：%s" % "、".join(stale_files))
 
     # 设置：移除记录打包机绝对路径的项目条目；匿名统计 id 换新
     sp = os.path.join(stage, "data", "settings.json")
