@@ -292,6 +292,117 @@ class JinyuTVLauncher
         return ok;
     }
 
+    [DllImport("gdi32.dll")]
+    static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
+    [DllImport("user32.dll")]
+    static extern int SetWindowRgn(IntPtr hwnd, IntPtr hRgn, bool redraw);
+    const int WM_NCLBUTTONDOWN = 0x00A1;
+    [DllImport("user32.dll")] static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+
+    /// <summary>
+    /// 自绘圆角面板。软件内的卡片都是圆角，授权窗口若用方角 Panel 会明显"不像一家人"。
+    /// </summary>
+    class RoundedPanel : Panel
+    {
+        public int Radius { get { return _radius; } set { _radius = value; Invalidate(); } }
+        int _radius = 6;
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyRegion();
+        }
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            ApplyRegion();
+        }
+
+        /// <summary>
+        /// 用窗口区域(HRGN) 裁真圆角。
+        /// 为什么不用 OnPaint 自绘：Panel 的背景绘制在 OnPaint 之前发生，
+        /// 自绘圆角会被基类刷掉；而 Region 是**真正裁掉四角**，任何绘制方式都生效。
+        /// </summary>
+        void ApplyRegion()
+        {
+            try
+            {
+                if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
+                var region = CreateRoundRectRgn(0, 0, Width + 1, Height + 1, _radius * 2, _radius * 2);
+                SetWindowRgn(Handle, region, true);   // 系统接管该区域的生命周期
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>自绘圆角按钮（FlatStyle.Flat + Region 在离屏渲染下不可靠，直接 OnPaint）。</summary>
+    class RoundedButton : Button
+    {
+        public int Radius { get { return _radius; } set { _radius = value; Invalidate(); } }
+        int _radius = 6;
+
+        public RoundedButton()
+        {
+            FlatStyle = FlatStyle.Flat;
+            // 让按钮自己画背景，否则 Flat 按钮会把 Region 裁掉的角补回方角色
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            ApplyRegion();
+        }
+
+        protected override void OnSizeChanged(EventArgs e)
+        {
+            base.OnSizeChanged(e);
+            ApplyRegion();
+        }
+
+        void ApplyRegion()
+        {
+            try
+            {
+                if (!IsHandleCreated || Width <= 0 || Height <= 0) return;
+                var region = CreateRoundRectRgn(0, 0, Width + 1, Height + 1, _radius * 2, _radius * 2);
+                SetWindowRgn(Handle, region, true);
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>自绘圆角多行输入框。</summary>
+    class RoundedTextBox : TextBox
+    {
+        public int Radius { get { return _radius; } set { _radius = value; Invalidate(); } }
+        int _radius = 6;
+
+        public RoundedTextBox()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                int d = Math.Max(1, _radius * 2);
+                path.AddArc(0, 0, d, d, 180, 90);
+                path.AddArc(Width - d, 0, d, d, 270, 90);
+                path.AddArc(Width - d, Height - d, d, d, 0, 90);
+                path.AddArc(0, Height - d, d, d, 90, 90);
+                path.CloseFigure();
+                using (var pen = new Pen(Parent != null ? Parent.BackColor : ForeColor))
+                    e.Graphics.DrawPath(pen, path);   // 补一圈同底色的描边，遮住方角
+            }
+        }
+    }
+
     /// <summary>授权窗口：显示机器码（可一键复制）+ 输入授权码 + 激活按钮。</summary>
     class LicenseForm : Form
     {
@@ -302,127 +413,104 @@ class JinyuTVLauncher
         readonly Button _activate;
         readonly Button _exitButton;
 
-        public LicenseForm(string machine, string reason)
+public LicenseForm(string machine, string reason)
         {
             _machine = machine ?? "";
             _reason = reason ?? "";
 
-            // ---- 配色全部取自软件自身：主色读 settings.json，其余与 ShellBg 同族----
-        Color bg = JinyuTVLauncher.ShellBg;                  // #17171A，与软件外壳同色
-        Color accent = HexToColor(ReadPrimaryColor());      // 用户设置里的主色（默认近黑 #171717）
-        Color accentSolid = AccentFor(accent, bg);           // 主色提亮到「看得见」的版本
-        Color onAccent = ReadableOn(accentSolid);            // 按钮上的可读文字
-        // logo 用**反相**：主色是近黑，直接当块底就是一团黑、看不见" J"。
-        // 所以 logo 取「亮底 + 深字」，与按钮（亮底白字）视觉呼应又不靠色相区分层级。
-        Color logoBg = Color.FromArgb(0xE8, 0xE8, 0xEC);
-        Color logoFg = Color.FromArgb(0x1B, 0x1B, 0x1F);
-        Color surface = Color.FromArgb(0x21, 0x21, 0x26);    // 卡片面：比底色略亮
-        Color surfaceHi = Color.FromArgb(0x2B, 0x2B, 0x32);  // 次级按钮面
-        Color inputBg = Color.FromArgb(0x14, 0x15, 0x19);    // 输入区底：比外壳略浅，形成凹陷感
-        Color border = Color.FromArgb(0x3A, 0x3A, 0x44);
-        Color textHi = Color.FromArgb(0xEC, 0xEC, 0xF0);
-        Color textMid = Color.FromArgb(0x9A, 0x9A, 0xA6);
-        Color textDim = Color.FromArgb(0x6E, 0x6E, 0x7A);
-        Color danger = Color.FromArgb(0xE8, 0x7C, 0x74);
-        Color ok = Color.FromArgb(0x6C, 0xC7, 0x9A);
+            // ---- 配色沿用软件自身（底色与外壳同色，主色来自设置）----
+            Color bg = JinyuTVLauncher.ShellBg;
+            Color accent = HexToColor(ReadPrimaryColor());
+            Color accentSolid = AccentFor(accent, bg);
+            Color onAccent = ReadableOn(accentSolid);
+            Color inputBg = Color.FromArgb(0x11, 0x12, 0x16);
+            Color textHi = Color.FromArgb(0xEC, 0xEC, 0xF0);
+            Color textMid = Color.FromArgb(0x99, 0x99, 0xA4);
+            Color danger = Color.FromArgb(0xE8, 0x7C, 0x74);
 
-            Text = "JinyuTV 激活";
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedSingle;
+            FormBorderStyle = FormBorderStyle.None;   // 无边框：标题栏自己画，避免系统蓝条与软件风格冲突
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(560, 540);
+            ClientSize = new Size(468, 356);
             BackColor = bg;
             ForeColor = textHi;
             Font = new Font("Microsoft YaHei UI", 9F);
             KeyPreview = true;
 
-            // ---- 顶部品牌区：主色圆角块 + 产品名 + 一句话定位 ----
-            var logo = new Panel
+            // ---- 标题栏：标题 + 关闭按钮（可拖动窗口）----
+            var titleBar = new Panel
             {
-                Bounds = new Rectangle(32, 28, 52, 52),
-                BackColor = logoBg,
+                Bounds = new Rectangle(0, 0, 468, 44),
+                BackColor = bg,
+                Cursor = Cursors.SizeAll,
             };
-            var logoMark = new Label
+            titleBar.MouseDown += delegate(object s2, MouseEventArgs e2)
             {
-                Text = "J",
-                ForeColor = logoFg,
-                Font = new Font("Microsoft YaHei UI", 24F, FontStyle.Bold),
-                TextAlign = ContentAlignment.MiddleCenter,
-                Dock = DockStyle.Fill,
+                if (e2.Button != MouseButtons.Left) return;
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, new IntPtr(2), IntPtr.Zero);   // HTCAPTION
             };
-            logo.Controls.Add(logoMark);
-            MakeRounded(logo, 12);
-
-            var brand = new Label
-            {
-                Text = "JinyuTV",
-                ForeColor = textHi,
-                Font = new Font("Microsoft YaHei UI", 16F, FontStyle.Bold),
-                Bounds = new Rectangle(96, 32, 240, 26),
-            };
-
-            var brandSub = new Label
-            {
-                Text = "AI 视频创作工具",
-                ForeColor = textDim,
-                Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(98, 58, 240, 18),
-            };
-
             var title = new Label
             {
-                Text = "需要激活才能使用",
-                ForeColor = textHi,
-                Font = new Font("Microsoft YaHei UI", 12.5F, FontStyle.Bold),
-                Bounds = new Rectangle(32, 96, 500, 26),
-            };
-
-            var intro = new Label
-            {
-                Text = "本软件按电脑授权，一台电脑需要一个授权码。\r\n" +
-                       "把下面的机器码发给软件提供方，拿到授权码后粘贴进来即可。",
+                Text = "JinyuTV 激活",
                 ForeColor = textMid,
-                Bounds = new Rectangle(32, 126, 500, 42),
+                Font = new Font("Microsoft YaHei UI", 9F),
+                Bounds = new Rectangle(20, 13, 200, 20),
+            };
+            var closeBtn = new RoundedButton
+            {
+                Radius = 5,
+                Text = "✕",
+                Bounds = new Rectangle(414, 10, 34, 24),
+                BackColor = Color.FromArgb(0x28, 0x28, 0x2E),
+                ForeColor = textMid,
+                Font = new Font("Microsoft YaHei UI", 9F),
+                TabStop = false,
+                Cursor = Cursors.Hand,
+            };
+            closeBtn.Click += delegate { Close(); };
+            titleBar.Controls.AddRange(new Control[] { title, closeBtn });
+            MakeRounded(titleBar, 10);
+
+            // ---- 主文案：就一句话 ----
+            var heading = new Label
+            {
+                Text = "请联系管理员激活",
+                ForeColor = textHi,
+                Font = new Font("Microsoft YaHei UI", 14F, FontStyle.Bold),
+                Bounds = new Rectangle(32, 62, 400, 28),
             };
 
-            // ---- 机器码卡片 ----
-            var codeCard = new Panel
+            // ---- 机器码：标签 + 可复制文本 + 复制按钮，一行放下 ----
+            var machineLabel = new Label
             {
-                Bounds = new Rectangle(32, 180, 496, 76),
-                BackColor = surface,
-                Padding = new Padding(14, 10, 14, 10),
-            };
-
-            var codeLabel = new Label
-            {
-                Text = "本机机器码",
+                Text = "机器码",
                 ForeColor = textMid,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(14, 10, 200, 18),
+                Bounds = new Rectangle(32, 104, 200, 16),
             };
-
-            var codeBox = new TextBox
+            var machineBox = new RoundedPanel
+            {
+                Bounds = new Rectangle(32, 122, 404, 44),
+                BackColor = Color.FromArgb(0x1E, 0x1E, 0x24),
+                Radius = 6,
+            };
+            var machineText = new Label
             {
                 Text = _machine,
-                ReadOnly = true,
-                Bounds = new Rectangle(14, 32, 358, 30),
-                BackColor = bg,
-                ForeColor = ok,
-                Font = new Font("Consolas", 12.5F),
-                BorderStyle = BorderStyle.None,
-                TabStop = false,
+                ForeColor = textMid,
+                Font = new Font("Consolas", 12F),
+                Bounds = new Rectangle(14, 12, 288, 22),
+                TextAlign = ContentAlignment.MiddleLeft,
             };
-            // 只读框仍然要能被复制：显式允许选中，否则点进去选不了。
-            codeBox.ReadOnly = true;
-            codeBox.Cursor = Cursors.IBeam;
-
-            var copyBtn = new Button
+            var copyBtn = new RoundedButton
             {
+                Radius = 5,
                 Text = "复制",
-                Bounds = new Rectangle(382, 32, 96, 30),
+                Bounds = new Rectangle(310, 9, 80, 26),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = surfaceHi,
+                BackColor = Color.FromArgb(0x30, 0x30, 0x3A),
                 ForeColor = textHi,
                 Font = new Font("Microsoft YaHei UI", 9F),
                 Cursor = Cursors.Hand,
@@ -434,10 +522,8 @@ class JinyuTVLauncher
                 {
                     Clipboard.SetText(_machine);
                     copyBtn.Text = "已复制";
-                    codeBox.Focus();
-                    codeBox.SelectAll();
                     // ⚠️ 必须写全命名空间：using 里同时有 System.Threading.Timer
-                    //与 System.Windows.Forms.Timer，直接写 Timer 会有歧义（编译报错 CS0104）。
+                    // 与 System.Windows.Forms.Timer，直接写 Timer 会有歧义（CS0104）。
                     var timer = new System.Windows.Forms.Timer { Interval = 1600 };
                     timer.Tick += delegate(object s, EventArgs e)
                     {
@@ -448,88 +534,80 @@ class JinyuTVLauncher
                 }
                 catch (Exception ex) { SetStatus("复制失败：" + ex.Message, true); }
             };
+            machineBox.Controls.AddRange(new Control[] { machineText, copyBtn });
 
-            codeCard.Controls.AddRange(new Control[] { codeLabel, codeBox, copyBtn });
-            MakeRounded(codeCard, 10);
-
-            // ---- 授权码输入卡片 ----
-            var inputLabel = new Label
+            // ---- 授权码：标签 + 带边框的输入区 ----
+            var codeLabel = new Label
             {
                 Text = "授权码",
                 ForeColor = textMid,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(32, 268, 200, 18),
+                Bounds = new Rectangle(32, 184, 200, 16),
             };
-
-            var hint = new Label
+            // 加一层明显的外框，让"这里能填"一目了然。
+            // ⚠️ 不要用 Panel.Padding + 子控件坐标去"让位" —— 实测边框只在左侧出现
+            //    （DrawToBitmap 下 Padding 不参与子控件定位）。改为给边框容器设边距、
+            //    内部控件按 inset 显式定位，四条边才完整。
+            const int INPUT_X = 32, INPUT_Y = 202, INPUT_W = 404, INPUT_H = 68;
+            var inputShell = new RoundedPanel
             {
-                Text = "粘贴完整的一整段（两段，以英文小数点分隔）",
-                ForeColor = textDim,
-                Font = new Font("Microsoft YaHei UI", 8F),
-                Bounds = new Rectangle(280, 269, 248, 18),
-                TextAlign = ContentAlignment.MiddleRight,
+                Bounds = new Rectangle(INPUT_X, INPUT_Y, INPUT_W, INPUT_H),
+                BackColor = Color.FromArgb(0x3E, 0x3E, 0x4A),   // 边框：比底色明显亮一档
+                Radius = 6,
             };
-
-            // 输入区要能从卡片面上"浮"出来：比 surface 再亮一档，
-            // 否则输入框与卡片同色（都是 33,33,38），边界完全看不出来。
-            _input = new TextBox
+            _input = new RoundedTextBox
             {
-                Bounds = new Rectangle(32, 290, 496, 92),
+                Bounds = new Rectangle(2, 2, INPUT_W - 4, INPUT_H - 4),
                 BackColor = inputBg,
                 ForeColor = textHi,
-                Font = new Font("Consolas", 9F),
+                Font = new Font("Consolas", 9.5F),
                 BorderStyle = BorderStyle.None,
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical,
                 WordWrap = true,
             };
+            inputShell.Controls.Add(_input);
 
+            // ---- 状态提示（出错时才显示）----
             _status = new Label
             {
-                Text = _reason.Length > 0 ? ("上次激活未通过：" + _reason) : "",
+                Text = _reason.Length > 0 ? _reason : "",
                 ForeColor = danger,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(32, 390, 496, 46),
+                Bounds = new Rectangle(32, 278, 404, 26),
             };
 
-            var tip = new Label
+            _activate = new RoundedButton
             {
-                Text = "授权码与本机绑定，复制到其它电脑无效。",
-                ForeColor = textDim,
-                Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(32, 458, 330, 30),
-                TextAlign = ContentAlignment.MiddleLeft,
-            };
-
-            _activate = new Button
-            {
+                Radius = 6,
                 Text = "激活",
-                Bounds = new Rectangle(372, 450, 96, 36),
+                Bounds = new Rectangle(244, 306, 96, 32),
                 FlatStyle = FlatStyle.Flat,
                 BackColor = accentSolid,
                 ForeColor = onAccent,
-                Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold),
+                Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold),
                 Cursor = Cursors.Hand,
                 TabStop = false,
             };
             _activate.Click += delegate { TryActivate(); };
-            MakeRounded(_activate, 8);
 
-            _exitButton = new Button
+
+            _exitButton = new RoundedButton
             {
+                Radius = 6,
                 Text = "退出",
-                Bounds = new Rectangle(478, 450, 50, 36),
+                Bounds = new Rectangle(348, 306, 88, 32),
                 FlatStyle = FlatStyle.Flat,
-                BackColor = surfaceHi,
+                BackColor = Color.FromArgb(0x2C, 0x2C, 0x34),
                 ForeColor = textMid,
                 Cursor = Cursors.Hand,
                 TabStop = false,
                 DialogResult = DialogResult.Cancel,
             };
 
-            Controls.AddRange(new Control[] { logo, brand, brandSub, title, intro,
-                                               codeCard, inputLabel, hint, _input, _status,
-                                               tip, _activate, _exitButton });
+            Controls.AddRange(new Control[] { titleBar, heading, machineLabel, machineBox, codeLabel, inputShell, _status, _activate, _exitButton });
+            // 无边框窗体：Alt+F4 与回车仍要生效
+            KeyPreview = true;
             AcceptButton = _activate;
             CancelButton = _exitButton;
             Shown += delegate { _input.Focus(); };
@@ -615,11 +693,6 @@ class JinyuTVLauncher
         {
             return (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
         }
-
-        [DllImport("gdi32.dll")]
-        static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int widthEllipse, int heightEllipse);
-        [DllImport("user32.dll")]
-        static extern int SetWindowRgn(IntPtr hwnd, IntPtr hRgn, bool redraw);
 
         /// <summary>
         /// 把控件裁成圆角。WinForms 的 FlatStyle.Flat 只有方角，

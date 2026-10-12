@@ -67,3 +67,5 @@ scripts/license/private*
 # 截图宿主的临时产物
 scripts/_shot-license.cs
 scripts/_out/_shot-license.exe
+scripts/_ctor_old.txt
+scripts/_ctor_new.txt
