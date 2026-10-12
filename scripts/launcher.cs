@@ -413,108 +413,133 @@ class JinyuTVLauncher
         readonly Button _activate;
         readonly Button _exitButton;
 
-public LicenseForm(string machine, string reason)
+        /// <summary>统一的字段标签：小号灰字，贴在输入框正上方。</summary>
+        static Label MakeFieldLabel(string text, Color color)
+        {
+            return new Label { Text = text, ForeColor = color, Font = new Font("Microsoft YaHei UI", 8.5F), Height = 16 };
+        }
+
+        /// <summary>无边框窗体拖动：把鼠标按下转成标题栏行为（WM_NCLBUTTONDOWN + HTCAPTION）。</summary>
+        void DragWindow()
+        {
+            ReleaseCapture();
+            SendMessage(Handle, WM_NCLBUTTONDOWN, new IntPtr(2), IntPtr.Zero);
+        }
+
+        public LicenseForm(string machine, string reason)
         {
             _machine = machine ?? "";
             _reason = reason ?? "";
 
-            // ---- 配色沿用软件自身（底色与外壳同色，主色来自设置）----
-            Color bg = JinyuTVLauncher.ShellBg;
-            Color accent = HexToColor(ReadPrimaryColor());
+            // ---- 与软件主界面同源：底色 = 外壳色，主色读设置，圆角 8px（软件默认值）----
+            Color bg = JinyuTVLauncher.ShellBg;                         // #17171A
+            Color accent = HexToColor(ReadPrimaryColor());              // #171717
             Color accentSolid = AccentFor(accent, bg);
             Color onAccent = ReadableOn(accentSolid);
-            Color inputBg = Color.FromArgb(0x11, 0x12, 0x16);
-            Color textHi = Color.FromArgb(0xEC, 0xEC, 0xF0);
-            Color textMid = Color.FromArgb(0x99, 0x99, 0xA4);
-            Color danger = Color.FromArgb(0xE8, 0x7C, 0x74);
+            // 卡片面/ 描边 / 输入槽：按主界面「卡片比底色亮一档」的规律递进
+            Color surface = Color.FromArgb(0x21, 0x21, 0x26);
+            Color stroke = Color.FromArgb(0x33, 0x33, 0x3C);
+            Color slotBg = Color.FromArgb(0x17, 0x18, 0x1C);
+            Color textHi = Color.FromArgb(0xF0, 0xF0, 0xF4);
+            Color textMid = Color.FromArgb(0x8C, 0x8C, 0x99);
+            Color danger = Color.FromArgb(0xE0, 0x6C, 0x62);
+            Color ok = Color.FromArgb(0x63, 0xC1, 0x93);   // 复制成功反馈
+            const int R = 8;      // 软件 --ui-radius 默认 8px，弹窗必须一致
 
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.None;   // 无边框：标题栏自己画，避免系统蓝条与软件风格冲突
+            FormBorderStyle = FormBorderStyle.None;
             MaximizeBox = false;
             MinimizeBox = false;
-            ClientSize = new Size(468, 356);
+            ClientSize = new Size(432, 300);
             BackColor = bg;
             ForeColor = textHi;
             Font = new Font("Microsoft YaHei UI", 9F);
             KeyPreview = true;
+            MakeRounded(this, 12);      // 窗口本身圆角
 
-            // ---- 标题栏：标题 + 关闭按钮（可拖动窗口）----
-            var titleBar = new Panel
-            {
-                Bounds = new Rectangle(0, 0, 468, 44),
-                BackColor = bg,
-                Cursor = Cursors.SizeAll,
-            };
-            titleBar.MouseDown += delegate(object s2, MouseEventArgs e2)
-            {
-                if (e2.Button != MouseButtons.Left) return;
-                ReleaseCapture();
-                SendMessage(Handle, WM_NCLBUTTONDOWN, new IntPtr(2), IntPtr.Zero);   // HTCAPTION
-            };
+            // ---- 顶部：只放标题与关闭键，不加副标题/说明 ----
             var title = new Label
             {
-                Text = "JinyuTV 激活",
-                ForeColor = textMid,
-                Font = new Font("Microsoft YaHei UI", 9F),
-                Bounds = new Rectangle(20, 13, 200, 20),
+                Text = "请联系管理员激活",
+                ForeColor = textHi,
+                Font = new Font("Microsoft YaHei UI", 13F, FontStyle.Bold),
+                Bounds = new Rectangle(28, 22, 300, 24),
+                // 标题栏空白处也能拖动窗口
             };
+            title.MouseDown += delegate { DragWindow(); };
+            var topDrag = new Panel { Bounds = new Rectangle(0, 0, 400, 50), BackColor = Color.Transparent };
+            topDrag.MouseDown += delegate { DragWindow(); };
+            topDrag.Controls.Add(title);
+
             var closeBtn = new RoundedButton
             {
-                Radius = 5,
+                Radius = R,
                 Text = "✕",
-                Bounds = new Rectangle(414, 10, 34, 24),
-                BackColor = Color.FromArgb(0x28, 0x28, 0x2E),
+                Bounds = new Rectangle(380, 20, 26, 26),
+                BackColor = Color.Transparent,
                 ForeColor = textMid,
-                Font = new Font("Microsoft YaHei UI", 9F),
+                Font = new Font("Microsoft YaHei UI", 9.5F),
                 TabStop = false,
                 Cursor = Cursors.Hand,
             };
             closeBtn.Click += delegate { Close(); };
-            titleBar.Controls.AddRange(new Control[] { title, closeBtn });
-            MakeRounded(titleBar, 10);
 
-            // ---- 主文案：就一句话 ----
-            var heading = new Label
+            // ---- 卡片：机器码 + 授权码放在同一张卡片里，形成一个整体 ----
+            var card = new RoundedPanel
             {
-                Text = "请联系管理员激活",
-                ForeColor = textHi,
-                Font = new Font("Microsoft YaHei UI", 14F, FontStyle.Bold),
-                Bounds = new Rectangle(32, 62, 400, 28),
+                Radius = R,
+                Bounds = new Rectangle(28, 62, 376, 158),
+                BackColor = surface,
+            };
+            var cardStroke = new RoundedPanel
+            {
+                Radius = R,
+                Bounds = new Rectangle(29, 63, 374, 156),
+                BackColor = Color.Transparent,
             };
 
-            // ---- 机器码：标签 + 可复制文本 + 复制按钮，一行放下 ----
-            var machineLabel = new Label
-            {
-                Text = "机器码",
-                ForeColor = textMid,
-                Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(32, 104, 200, 16),
-            };
-            var machineBox = new RoundedPanel
-            {
-                Bounds = new Rectangle(32, 122, 404, 44),
-                BackColor = Color.FromArgb(0x1E, 0x1E, 0x24),
-                Radius = 6,
-            };
-            var machineText = new Label
+            // 机器码：标签在上，等宽码 + 复制键在同一行
+            var machineLabel = MakeFieldLabel("机器码", textMid);
+            machineLabel.Bounds = new Rectangle(16, 16, 200, 16);
+
+            var machineValue = new Label
             {
                 Text = _machine,
-                ForeColor = textMid,
-                Font = new Font("Consolas", 12F),
-                Bounds = new Rectangle(14, 12, 288, 22),
+                ForeColor = textHi,
+                Font = new Font("Consolas", 11.5F),
+                Bounds = new Rectangle(16, 38, 250, 24),
                 TextAlign = ContentAlignment.MiddleLeft,
             };
+            // 点机器码即复制，并让码变绿作为反馈
+            machineValue.Cursor = Cursors.Hand;
+            machineValue.MouseDown += delegate
+            {
+                try
+                {
+                    Clipboard.SetText(_machine);
+                    machineValue.ForeColor = ok;
+                    var back = new System.Windows.Forms.Timer { Interval = 1200 };
+                    Color normal = textHi;
+                    back.Tick += delegate(object s3, EventArgs e3)
+                    {
+                        ((System.Windows.Forms.Timer)s3).Stop();
+                        machineValue.ForeColor = normal;
+                    };
+                    back.Start();
+                }
+                catch { }
+            };
+
             var copyBtn = new RoundedButton
             {
-                Radius = 5,
+                Radius = R - 2,
                 Text = "复制",
-                Bounds = new Rectangle(310, 9, 80, 26),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(0x30, 0x30, 0x3A),
+                Bounds = new Rectangle(280, 38, 80, 24),
+                BackColor = Color.FromArgb(0x2E, 0x2E, 0x37),
                 ForeColor = textHi,
                 Font = new Font("Microsoft YaHei UI", 9F),
-                Cursor = Cursors.Hand,
                 TabStop = false,
+                Cursor = Cursors.Hand,
             };
             copyBtn.Click += delegate
             {
@@ -534,80 +559,77 @@ public LicenseForm(string machine, string reason)
                 }
                 catch (Exception ex) { SetStatus("复制失败：" + ex.Message, true); }
             };
-            machineBox.Controls.AddRange(new Control[] { machineText, copyBtn });
 
-            // ---- 授权码：标签 + 带边框的输入区 ----
-            var codeLabel = new Label
+            // 分隔线：卡片内两块内容的界限
+            var divider = new Panel
             {
-                Text = "授权码",
-                ForeColor = textMid,
-                Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(32, 184, 200, 16),
+                Bounds = new Rectangle(16, 76, 344, 1),
+                BackColor = stroke,
             };
-            // 加一层明显的外框，让"这里能填"一目了然。
-            // ⚠️ 不要用 Panel.Padding + 子控件坐标去"让位" —— 实测边框只在左侧出现
-            //    （DrawToBitmap 下 Padding 不参与子控件定位）。改为给边框容器设边距、
-            //    内部控件按 inset 显式定位，四条边才完整。
-            const int INPUT_X = 32, INPUT_Y = 202, INPUT_W = 404, INPUT_H = 68;
-            var inputShell = new RoundedPanel
+
+            // 授权码：标签在上，输入槽在下（槽比卡片更暗 = 凹陷可填）
+            var codeLabel = MakeFieldLabel("授权码", textMid);
+            codeLabel.Bounds = new Rectangle(16, 90, 200, 16);
+
+            var codeShell = new RoundedPanel
             {
-                Bounds = new Rectangle(INPUT_X, INPUT_Y, INPUT_W, INPUT_H),
-                BackColor = Color.FromArgb(0x3E, 0x3E, 0x4A),   // 边框：比底色明显亮一档
-                Radius = 6,
+                Radius = R - 2,
+                Bounds = new Rectangle(16, 110, 344, 34),
+                BackColor = slotBg,
             };
             _input = new RoundedTextBox
             {
-                Bounds = new Rectangle(2, 2, INPUT_W - 4, INPUT_H - 4),
-                BackColor = inputBg,
+                Radius = R - 2,
+                Bounds = new Rectangle(10, 8, 324, 18),
+                BackColor = slotBg,
                 ForeColor = textHi,
-                Font = new Font("Consolas", 9.5F),
+                Font = new Font("Consolas", 9F),
                 BorderStyle = BorderStyle.None,
-                Multiline = true,
-                ScrollBars = ScrollBars.Vertical,
-                WordWrap = true,
+                Multiline = false,
+                ScrollBars = ScrollBars.None,
             };
-            inputShell.Controls.Add(_input);
+            codeShell.Controls.Add(_input);
 
-            // ---- 状态提示（出错时才显示）----
+            card.Controls.AddRange(new Control[] { machineLabel, machineValue, copyBtn, divider, codeLabel, codeShell });
+
+            // ---- 状态提示（出错时才显示，占位防跳动）----
             _status = new Label
             {
                 Text = _reason.Length > 0 ? _reason : "",
                 ForeColor = danger,
                 Font = new Font("Microsoft YaHei UI", 8.5F),
-                Bounds = new Rectangle(32, 278, 404, 26),
+                Bounds = new Rectangle(28, 230, 376, 18),
             };
 
+            // ---- 底部：主按钮实心、次按钮低调 ----
             _activate = new RoundedButton
             {
-                Radius = 6,
+                Radius = R,
                 Text = "激活",
-                Bounds = new Rectangle(244, 306, 96, 32),
-                FlatStyle = FlatStyle.Flat,
+                Bounds = new Rectangle(244, 256, 96, 32),
                 BackColor = accentSolid,
                 ForeColor = onAccent,
                 Font = new Font("Microsoft YaHei UI", 9.5F, FontStyle.Bold),
-                Cursor = Cursors.Hand,
                 TabStop = false,
+                Cursor = Cursors.Hand,
             };
             _activate.Click += delegate { TryActivate(); };
 
-
             _exitButton = new RoundedButton
             {
-                Radius = 6,
-                Text = "退出",
-                Bounds = new Rectangle(348, 306, 88, 32),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(0x2C, 0x2C, 0x34),
+                Radius = R,
+                Text = "取消",
+                Bounds = new Rectangle(344, 256, 60, 32),
+                BackColor = surface,
                 ForeColor = textMid,
-                Cursor = Cursors.Hand,
+                Font = new Font("Microsoft YaHei UI", 9.5F),
                 TabStop = false,
+                Cursor = Cursors.Hand,
                 DialogResult = DialogResult.Cancel,
             };
 
-            Controls.AddRange(new Control[] { titleBar, heading, machineLabel, machineBox, codeLabel, inputShell, _status, _activate, _exitButton });
-            // 无边框窗体：Alt+F4 与回车仍要生效
-            KeyPreview = true;
+            Controls.AddRange(new Control[] { topDrag, closeBtn, card, cardStroke, _status, _activate, _exitButton });
+            // 无边框窗体：回车=激活，Esc=取消
             AcceptButton = _activate;
             CancelButton = _exitButton;
             Shown += delegate { _input.Focus(); };
