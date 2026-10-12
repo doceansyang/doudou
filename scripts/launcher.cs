@@ -1682,6 +1682,9 @@ public LicenseForm(string machine, string reason)
         string projectDir = Path.Combine(wsRoot, "我的项目");
         try { Directory.CreateDirectory(wsRoot); } catch { }
 
+        // 先留快照，再动 settings.json。
+        RollSettingsSnapshot(Path.Combine(dataDir, "settings.json"));
+
         // 默认项目目录**只在真的要用到它时才创建**。
         //   以前是无条件创建，于是每个用户的工作区里都多出一个空的「我的项目」，
         //   在「导入项目 / 添加项目」的目录浏览器里就是一个看不懂的空文件夹 ——
@@ -1770,6 +1773,37 @@ public LicenseForm(string machine, string reason)
         }
         catch { /* 校准失败不阻断启动，服务端仍会给出明确报错 */ }
         return usedDefault;
+    }
+
+    /// <summary>
+    /// 每次启动给 settings.json 留一份滚动快照（保留最近 3 代：.prev / .prev1 / .prev2）。
+    ///
+    /// 为什么需要（这是「我的项目不见了」的根因所在）：
+    ///   项目列表存在 `settings.stores["toonflow.projectList"]` 里，而保存设置的接口
+    ///   `PUT /api/settings/save` 是**整体覆盖**（`u.conf.set("settings", settings)`），
+    ///   不是合并。于是只要前端在「内存里那个 store 还是初始值」的时刻保存一次，
+    ///   磁盘上的登记就会被 `{"project": null, "projectList": []}` 直接盖掉 ——
+    ///   项目文件夹一个没少，但列表空了。
+    ///
+    ///   原有的 Backup() 只在**首次**写一份 `.orig`（本机那份还是 10-09 的），
+    ///   对这种"用着用着被后续保存覆盖"完全无能为力。
+    ///
+    ///   留 3 代是因为：覆盖发生在第 N 次启动，第 N 次启动时 .prev 抓到的是
+    ///   **好的那份**；即便到第 N+1 次启动被挤走，也还有 .prev1 / .prev2 兜着。
+    /// </summary>
+    static void RollSettingsSnapshot(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return;
+            string prev = path + ".prev";
+            string prev1 = path + ".prev1";
+            string prev2 = path + ".prev2";
+            try { if (File.Exists(prev1)) File.Copy(prev1, prev2, true); } catch { }
+            try { if (File.Exists(prev)) File.Copy(prev, prev1, true); } catch { }
+            File.Copy(path, prev, true);
+        }
+        catch { /* 留档失败不阻断启动 */ }
     }
 
     /// <summary>
