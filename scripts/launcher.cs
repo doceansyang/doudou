@@ -245,7 +245,15 @@ class JinyuTVLauncher
         int at = raw.IndexOf(token, StringComparison.Ordinal);
         if (at < 0) return "";
         int i = at + token.Length;
-        while (i < raw.Length && (raw[i] == ' ' || raw[i] == '"')) i++;
+        // ⚠️ 这里**只能跳空格**，绝不能把引号一起跳掉！
+        //    踩过的坑：原来写的是 `while (... raw[i]==' ' || raw[i]=='"') i++;`，
+        //    开引号被吃掉后，下面的 `if (raw[i]=='"')` 永远不成立，于是走"无引号"
+        //    分支一路扫到 ',' 或 '}' —— 把**闭引号也塞进了返回值**。
+        //    表现：激活弹窗里机器码显示成 `81DE1-D8EC7-15AE3-FAEDA"`、
+        //    状态行显示 `NOT_ACTIVATED"`（本该被映射成空串）。
+        //    注：此 bug 只在**真实启动路径**下才暴露 —— 离屏走查是把机器码当
+        //    字面量直接传进 LicenseForm，压根不经过 JSON 解析。
+        while (i < raw.Length && raw[i] == ' ') i++;
         if (i < raw.Length && raw[i] == '"')
         {
             int end = raw.IndexOf('"', i + 1);
