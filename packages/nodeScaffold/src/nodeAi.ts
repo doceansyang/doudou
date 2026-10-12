@@ -57,10 +57,28 @@ export type NodeAiTool = {
   execute(args: Record<string, unknown>, signal?: AbortSignal): unknown | Promise<unknown>;
 };
 
+/**
+ * 供应商在模型下拉里的**优先级**（越靠前越优先）。
+ *
+ * 为什么需要它：分组顺序原本完全跟随服务端返回 —— 而服务端是按**文件名字母序**
+ * 读 `data/providers/*.ts` 的，于是顺序变成 apiMart → doubaoAccount → metaso，
+ * 豆包（本项目最常用的免费额度通道）被挤到中间，每天都要往下翻。
+ *
+ * 未列出的供应商排在后面，且彼此仍保持服务端顺序（Array.sort 是稳定排序）。
+ * 这个函数视频/图片/音频/文本节点共用，但 `doubaoAccount` 只声明了视频模型，
+ * 所以在文字、图片列表里不会产生任何影响。
+ */
+const PROVIDER_PRIORITY = ["doubaoAccount", "JinyuDream"];
+
+function providerRank(id: string) {
+  const index = PROVIDER_PRIORITY.indexOf(id);
+  return index < 0 ? PROVIDER_PRIORITY.length : index;
+}
+
 export function groupNodeModels<T extends Pick<NodeAiModel, "providerId" | "providerLabel">>(models: readonly T[]) {
   return [...Map.groupBy(models, item => item.providerId)].map(([id, items]) => ({
     id, label: items[0]!.providerLabel, models: items,
-  })).sort((left, right) => Number(right.id === "JinyuDream") - Number(left.id === "JinyuDream"));
+  })).sort((left, right) => providerRank(left.id) - providerRank(right.id));
 }
 
 async function readResult<T>(response: Response): Promise<T> {
