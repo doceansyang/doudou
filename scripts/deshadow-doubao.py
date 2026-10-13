@@ -32,6 +32,7 @@
 """
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -39,6 +40,18 @@ import cv2
 import numpy as np
 
 LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+
+# ffmpeg/ffprobe 定位：发行版把 ffmpeg 放在 data/ffmpeg 下、**不在 PATH 里**，
+# 所以由调用方（doubao-deshadow.ts）通过 DOUBAO_FFMPEG 传绝对路径进来；
+# 单独手跑本脚本时才回退到 PATH 上的裸命令。
+FFMPEG = os.environ.get("DOUBAO_FFMPEG") or "ffmpeg"
+_probe_override = os.environ.get("DOUBAO_FFPROBE")
+if _probe_override:
+    FFPROBE = _probe_override
+elif os.sep in FFMPEG or "/" in FFMPEG:
+    FFPROBE = str(Path(FFMPEG).with_name("ffprobe.exe"))
+else:
+    FFPROBE = "ffprobe"
 
 # 960x720 实测标定：水印在两个位置之间跳，框要覆盖它的活动范围。
 DEFAULT_BOXES = [
@@ -49,7 +62,7 @@ DEFAULT_BOXES = [
 
 def probe(video: Path):
     out = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+        [FFPROBE, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height,nb_frames,r_frame_rate", "-of", "json", str(video)],
         capture_output=True, text=True, check=True).stdout
     stream = json.loads(out)["streams"][0]
@@ -81,12 +94,12 @@ def main():
         print("  水印框 %s（%dx%d）" % (box, box[2] - box[0], box[3] - box[1]))
 
     decoder = subprocess.Popen(
-        ["ffmpeg", "-v", "error", "-i", str(video), "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        [FFMPEG, "-v", "error", "-i", str(video), "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     partial = args.output.with_name(args.output.stem + ".processing" + args.output.suffix)
     encoder = subprocess.Popen(
-        ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+        [FFMPEG, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
          "-video_size", "%dx%d" % (width, height), "-framerate", rate, "-i", "pipe:0",
          "-i", str(video), "-map", "0:v:0", "-map", "1:a?", "-map_metadata", "1",
          "-c:v", "libx264", "-preset", "medium", "-crf", str(args.crf),

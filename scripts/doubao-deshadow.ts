@@ -31,9 +31,9 @@ export type DeshadowResult = {
 
 type RunResult = { code: number | null; stdout: string; stderr: string };
 
-function run(command: string, args: string[], timeoutMs: number): Promise<RunResult> {
+function run(command: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<RunResult> {
   return new Promise((settle) => {
-    const child = spawn(command, args, { windowsHide: true });
+    const child = spawn(command, args, { windowsHide: true, ...(env ? { env } : {}) });
     let stdout = "";
     let stderr = "";
     let done = false;
@@ -53,13 +53,18 @@ function run(command: string, args: string[], timeoutMs: number): Promise<RunRes
   });
 }
 
-/** 找可用的 Python：环境变量 → 随发行版内置 → PATH 上的 python / py。 */
+/** 找可用的 Python：环境变量 → 随发行版内置 → PATH 上的 python / py。
+ *  ⚠️ `data/python` 若是 **venv**（我们用 `python -m venv` 建的），解释器在 `Scripts/` 下，
+ *  所以两种布局都要试 —— 少了这个，探测永远落空、一路走 delogo 兜底（踩过一次）。 */
 function pythonCandidates(): string[] {
   const list: string[] = [];
   const override = process.env.JINYUTV_PYTHON;
   if (override) list.push(override);
-  list.push(resolve(process.cwd(), "data", "python", "python.exe"));
-  list.push(resolve(process.cwd(), "runtime", "python", "python.exe"));
+  for (const root of ["data", "runtime"]) {
+    const base = resolve(process.cwd(), root, "python");
+    list.push(resolve(base, "python.exe"));
+    list.push(resolve(base, "Scripts", "python.exe"));
+  }
   list.push("python");
   list.push("python3");
   return list;
@@ -90,10 +95,14 @@ export async function deshadowVideo(
   if (python) {
     const script = resolve(process.cwd(), "scripts", "deshadow-doubao.py");
     if (existsSync(script)) {
+      // ⚠️ ffmpeg 在发行版里位于 data/ffmpeg，**不在 PATH 上**，必须显式传给 Python 侧
+      // （否则脚本内部 spawn ffmpeg 会 WinError 2，一路掉回 delogo 兜底 —— 踩过一次）。
+      const pyEnv = { ...process.env, DOUBAO_FFMPEG: resolveFfmpeg() };
       const result = await run(
         python,
         [script, videoPath, output, "--boxes", WATERMARK_BOXES],
         600_000,
+        pyEnv,
       );
       if (result.code === 0 && existsSync(output)) {
         await copyFile(videoPath, backup).catch(() => undefined);
