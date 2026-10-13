@@ -27,7 +27,7 @@
 
     <p class="panelSummary" :class="`is-${overallTone}`">
       <span class="dot" aria-hidden="true" />
-      <span v-if="accounts.length">可用 {{ usableCount }} · 额度用完 {{ exhaustedCount }} · 共 {{ accounts.length }}</span>
+      <span v-if="accounts.length">可用 {{ usableCount }} · 共 {{ accounts.length }}</span>
       <span v-else>还没有账号</span>
     </p>
 
@@ -41,10 +41,8 @@
           <span class="itemName" :title="item.name">{{ item.name }}</span>
           <span class="itemMeta">{{ metaOf(item) }}</span>
         </span>
-        <span class="itemQuota" :title="quotaTitle(item)">
-          <span class="quotaTrack"><span class="quotaFill" :style="{ width: `${quotaPercent(item)}%` }" /></span>
-          <span class="quotaLabel">{{ item.exhausted ? "已用完" : `剩 ${item.remaining}` }}</span>
-        </span>
+        <!-- 状态条：只表达「能不能用」，不写任何额度数字（绿=可用 / 红=用完 / 琥珀=生成中 / 灰=未登录） -->
+        <span class="itemBar" :title="statusTitle(item)" aria-hidden="true" />
       </li>
     </ul>
 
@@ -134,18 +132,21 @@ function metaOf(item: AccountRow): string {
   if (item.exhausted) return `${platform} · 今日额度已用完`;
   if (!item.hasLoggedIn) return `${platform} · 未登录`;
   if (item.busy) return `${platform} · 生成中`;
-  return `${platform} · 可用`;
+  // 可用时不重复写「可用」——右边那条绿条已经说明白了，这一行只留平台名，界面更干净。
+  return platform;
 }
 
-function quotaPercent(item: AccountRow): number {
-  if (item.exhausted) return 0;
-  const total = Number(item.dailyQuota) || 0;
-  if (total <= 0) return 0;
-  return Math.max(0, Math.min(100, Math.round((item.remaining / total) * 100)));
-}
-
-function quotaTitle(item: AccountRow): string {
-  return `今日已用 ${item.usedToday}/${item.dailyQuota}，剩余 ${item.remaining}`;
+/**
+ * 状态条的悬停说明。
+ *
+ * ⚠️ 刻意**不写任何额度数字**（用户口径：不写额度，用完不能用就显示红条条就行）——
+ * 要看「今日已用 x/y、剩 n」去「媒体供应商 → 豆包账号」，那里才是管额度的地方。
+ */
+function statusTitle(item: AccountRow): string {
+  if (item.exhausted) return "今日额度已用完，暂时不能用";
+  if (!item.hasLoggedIn) return "登录已失效，需要重新扫码";
+  if (item.busy) return "正在生成中";
+  return "可用";
 }
 
 async function refresh(quiet = false) {
@@ -388,51 +389,25 @@ onBeforeUnmount(stopPolling);
       text-overflow: ellipsis;
     }
 
-    /* 额度：细进度条 + 剩余数。红/灰状态下条子也一起变色，扫一眼就知道哪个号不能用了。 */
-    .itemQuota {
-      display: flex;
+    /* 状态条：只表达「能不能用」，不写额度数字、也不做百分比（长度无意义）。
+       条子本身变色：绿=可用、红=用完、琥珀=生成中、灰=未登录。 */
+    .itemBar {
       flex: none;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 3px;
-      width: 56px;
-    }
-
-    .quotaTrack {
-      width: 100%;
-      height: 4px;
-      overflow: hidden;
+      width: 72px;
+      height: 6px;
       border-radius: 999px;
-      background: var(--el-fill-color-dark);
-    }
-
-    .quotaFill {
-      display: block;
-      height: 100%;
-      border-radius: inherit;
-      background: var(--el-color-success);
-      transition: width 240ms ease;
-    }
-
-    .quotaLabel {
-      color: var(--el-text-color-secondary);
-      font-size: 10.5px;
-      white-space: nowrap;
+      background: var(--el-text-color-disabled);
+      transition: background-color 200ms ease;
     }
 
     &.is-danger {
-      .itemName, .quotaLabel { color: var(--el-color-danger); }
-      .quotaFill { background: var(--el-color-danger); }
+      .itemName { color: var(--el-color-danger); }
+      .itemBar { background: var(--el-color-danger); }
     }
 
-    &.is-warning {
-      .quotaFill { background: var(--el-color-warning); }
-    }
-
-    &.is-muted {
-      .itemName { color: var(--el-text-color-secondary); }
-      .quotaFill { background: var(--el-text-color-disabled); }
-    }
+    &.is-warning .itemBar { background: var(--el-color-warning); }
+    &.is-muted .itemBar { background: var(--el-text-color-disabled); }
+    &.is-success .itemBar { background: var(--el-color-success); }
   }
 
   .panelFoot {
