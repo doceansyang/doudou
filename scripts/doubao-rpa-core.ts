@@ -1,6 +1,6 @@
 import type { GenerateMedia, MediaAsset, VideoRequest } from "@toonflow/providers";
 import { createDecipheriv, createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -165,32 +165,130 @@ function log(message: string): void {
  * Edge 与 Chrome 同为 Chromium 内核，Playwright 通过 executablePath 驱动效果一致。
  * 仍可用 DOUBAO_BROWSER 环境变量手工指定（排障用）。
  */
-function chromeExecutable(): string | undefined {
-  const override = process.env.DOUBAO_BROWSER;
-  if (override && existsSync(override)) return override;
-  if (process.platform === "win32") {
-    const local = process.env.LOCALAPPDATA ?? "";
-    const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
-    const programFilesX86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
-    return [
-      // Chrome（优先：风控策略最宽松）
-      join(programFiles, "Google\\Chrome\\Application\\chrome.exe"),
-      join(programFilesX86, "Google\\Chrome\\Application\\chrome.exe"),
-      local && join(local, "Google\\Chrome\\Application\\chrome.exe"),
-      // Edge（Windows 自带，作为必达兜底）
-      join(programFilesX86, "Microsoft\\Edge\\Application\\msedge.exe"),
-      join(programFiles, "Microsoft\\Edge\\Application\\msedge.exe"),
-      join(programFilesX86, "Microsoft\\Edge\\Application\\msedge.exe"),
-    ].find((path): path is string => Boolean(path) && existsSync(path));
+/* --------------------------------------------------------- 浏览器内核选择 */
+
+/** 与账号池同一处数据目录：`<cwd>/data/doubao/`。 */
+const DOUBAO_DATA_DIR = resolve(process.cwd(), "data", "doubao");
+const BROWSER_FILE = resolve(DOUBAO_DATA_DIR, "browser.json");
+const ACCOUNTS_DIR = resolve(homedir(), ".toonflow-doubao-accounts");
+const LEGACY_PROFILE_DIR = resolve(homedir(), ".toonflow-doubao-profile");
+
+/** 进程内缓存（undefined = 已经算过但没找到；null = 还没算）。 */
+let browserCache: string | undefined | null = null;
+
+/** 是不是 Chromium 内核 —— 看它目录里有没有 Chromium 的资源包。 */
+function isChromium(exe: string): boolean {
+  try {
+    const dir = dirname(exe);
+    if (existsSync(join(dir, "chrome_100_percent.pak"))) return true;
+    return readdirSync(dir).some((name) => existsSync(join(dir, name, "chrome_100_percent.pak")));
+  } catch {
+    return false;
   }
+}
+
+/** 本机装了哪些 Chromium 内核浏览器（Chrome / Edge），按推荐顺序。 */
+export function listInstalledBrowsers(): Array<{ path: string; name: string }> {
   if (process.platform === "darwin") {
     return [
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-    ].find((path) => existsSync(path));
+      { path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Google Chrome" },
+      { path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", name: "Microsoft Edge" },
+    ].filter((item) => existsSync(item.path));
   }
-  return ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/microsoft-edge"]
-    .find((path) => existsSync(path));
+  if (process.platform !== "win32") {
+    return [
+      { path: "/usr/bin/google-chrome", name: "Google Chrome" },
+      { path: "/usr/bin/chromium", name: "Chromium" },
+      { path: "/usr/bin/microsoft-edge", name: "Microsoft Edge" },
+    ].filter((item) => existsSync(item.path));
+  }
+  const local = process.env.LOCALAPPDATA ?? "";
+  const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
+  const programFilesX86 = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+  return [
+    { path: join(programFiles, "Google\\Chrome\\Application\\chrome.exe"), name: "Google Chrome" },
+    { path: join(programFilesX86, "Google\\Chrome\\Application\\chrome.exe"), name: "Google Chrome" },
+    { path: local && join(local, "Google\\Chrome\\Application\\chrome.exe"), name: "Google Chrome（用户目录）" },
+    { path: join(programFilesX86, "Microsoft\\Edge\\Application\\msedge.exe"), name: "Microsoft Edge" },
+    { path: join(programFiles, "Microsoft\\Edge\\Application\\msedge.exe"), name: "Microsoft Edge" },
+  ].filter((item): item is { path: string; name: string } => Boolean(item.path) && existsSync(item.path));
+}
+
+/** 老装机（已经存在浏览器 profile）。 */
+function hasExistingProfiles(): boolean {
+  if (existsSync(LEGACY_PROFILE_DIR)) return true;
+  try {
+    return readdirSync(ACCOUNTS_DIR).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** 读 `browser.json` 里记下的选择。 */
+export function savedBrowser(): string {
+  try {
+    const data = JSON.parse(readFileSync(BROWSER_FILE, "utf-8")) as { executable?: string };
+    return typeof data?.executable === "string" ? data.executable : "";
+  } catch {
+    return "";
+  }
+}
+
+/** 记住选定的浏览器（粘性；下次启动沿用，避免换内核导致已有登录态失效）。 */
+export function saveBrowser(executable: string): void {
+  mkdirSync(DOUBAO_DATA_DIR, { recursive: true });
+  writeFileSync(
+    BROWSER_FILE,
+    JSON.stringify({ executable, updatedAt: new Date().toISOString() }, null, 2),
+    "utf-8",
+  );
+  browserCache = null; // 让下一次解析重新取值
+}
+
+/** 当前生效的浏览器 + 它从哪来（界面上要如实显示）。 */
+export function browserState(): { current: string; source: string; candidates: Array<{ path: string; name: string }> } {
+  const override = process.env.DOUBAO_BROWSER ?? "";
+  const saved = savedBrowser();
+  const candidates = listInstalledBrowsers();
+  if (override && existsSync(override)) return { current: override, source: "环境变量 DOUBAO_BROWSER", candidates };
+  if (saved && existsSync(saved)) return { current: saved, source: "已保存的选择", candidates };
+  const current = chromeExecutable() ?? "";
+  return { current, source: hasExistingProfiles() ? "沿用历史顺序（老装机）" : "自动挑的", candidates };
+}
+
+/**
+ * 选 Chromium 内核浏览器。
+ *
+ * ⚠️⚠️ **必须与 profile 一致，而且一旦定下就要粘住**：Chromium 从 127 起 cookie 用
+ * 「绑定到程序」的密钥加密（App-Bound），**Chrome 建的 profile 换成 Edge 打开就读不出
+ * cookie** ⇒ 登录态全丢、所有号得重扫一遍。所以：
+ *   · 优先 `DOUBAO_BROWSER` 环境变量（强制指定 / 排障）
+ *   · 其次 `data/doubao/browser.json`（粘性选择，账号管理页可改）
+ *   · 老装机（已有 profile）没记录时沿用历史的 Chrome→Edge 顺序，**不悄悄换内核**
+ *   · 全新装机才自由挑：本机装着哪个用哪个（Chrome 优先 —— 风控策略最宽松）
+ *
+ * ⚠️ 「用户的默认浏览器」这里**故意不自动采用**：Windows 的默认浏览器只能从注册表读
+ * （`reg.exe` 在某些安全策略下会被拦），而我们这边没法保证读得到；更要紧的是，
+ * 用户日常默认浏览器 ≠ 我们该用的内核（豆包风控对 Chrome 更宽松），而且一旦换内核
+ * 已有登录态就废了。所以这里给**显式选择**，默认保守。
+ */
+function chromeExecutable(): string | undefined {
+  if (browserCache !== null) return browserCache || undefined;
+  const override = process.env.DOUBAO_BROWSER ?? "";
+  if (override && existsSync(override) && isChromium(override)) {
+    browserCache = override;
+  } else {
+    if (override) log(`忽略 DOUBAO_BROWSER（不存在或不是 Chromium 内核）：${override}`);
+    const saved = savedBrowser();
+    if (saved && existsSync(saved)) browserCache = saved;
+    else {
+      if (saved) log(`上次用的浏览器不在了：${saved}，重新挑一个`);
+      browserCache = listInstalledBrowsers()[0]?.path;
+    }
+  }
+  if (browserCache) log(`浏览器内核：${browserCache}`);
+  else log("没找到可用的 Chromium 内核浏览器（Chrome / Edge），登录与生成都会失败");
+  return browserCache || undefined;
 }
 
 /**
@@ -1274,20 +1372,89 @@ async function resolveOriginalViaFplay(
 /* ------------------------------------------------------------------ 登录 */
 
 /** 打开浏览器让用户扫码；已登录则直接返回。传入 profileDir 即为「新增账号」。 */
-export async function openLogin(profileDir?: string, accountType?: string): Promise<void> {
+/** 登录窗捞到的登录态：**全部**账号 + 全量 cookie，交上层落成账号池记录。 */
+export type LoginCapture = {
+  sessionId: string;
+  fingerprint: string;
+  userId: string;
+  nickname: string;
+  cookies: ImportedCookie[];
+  /** 这个窗口里登录的**全部**豆包账号（豆包支持一个浏览器登多个号；至少含当前这个）。 */
+  browserAccounts: BrowserAccount[];
+};
+
+/**
+ * 把当前 context 的登录态整个捞出来 —— 关键是 **`multi_sids`**：
+ * 它列出这个浏览器里登录的全部账号（`<uid>:<sessionid>`），
+ * 所以「用户在里面登了几个号」就能一次全收，跟「从本机浏览器拉取」是同一个机制。
+ */
+async function captureSession(context: any, platform: { url: string }): Promise<LoginCapture> {
+  const raw = await context.cookies(platform.url);
+  const cookies: ImportedCookie[] = (raw as any[]).map((cookie) => ({
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path,
+    secure: cookie.secure,
+    httpOnly: cookie.httpOnly,
+    sameSite: cookie.sameSite,
+    expirationDate: Number(cookie.expires) > 0 ? Number(cookie.expires) : null,
+  }));
+  const read = (name: string) => String(cookies.find((item) => item.name === name)?.value ?? "").trim();
+  const sessionId = read("sessionid");
+  const browserAccounts = parseBrowserAccounts(read("multi_sids"));
+  if (!browserAccounts.length && sessionId) browserAccounts.push({ sessionId });
+  const identity = await fetchDoubaoIdentity(context);
+  return {
+    sessionId,
+    fingerprint: sessionId ? sessionFingerprint(sessionId) : "",
+    userId: identity?.userId ?? "",
+    nickname: identity?.name ?? "",
+    cookies,
+    browserAccounts,
+  };
+}
+
+/** 读当前窗口的 `multi_sids`（用来判断用户是不是又登录了新账号）。 */
+async function readMultiSids(context: any, url: string): Promise<string> {
+  try {
+    const cookies = await context.cookies(url);
+    return String((cookies as any[]).find((cookie) => cookie.name === "multi_sids")?.value ?? "");
+  } catch {
+    return "";
+  }
+}
+
+export async function openLogin(
+  profileDir?: string,
+  accountType?: string,
+  control?: {
+    signal?: AbortSignal;
+    shouldFinish?: () => boolean;
+    /**
+     * 无头运行。
+     * ⚠️ 面向用户时必须是有头（扫码要看得见），这个开关只给自动化测试 / 无显示环境用。
+     */
+    headless?: boolean;
+  },
+): Promise<LoginCapture> {
   const type = normalizeAccountType(accountType);
-  const home = homeUrlOf(type);
+  const platform = ACCOUNT_PLATFORMS[type];
+  const home = platform.url;
   const label = platformLabel(type);
-  const context = await launchContext(profileDir || PROFILE_ROOT);
+  const context = await launchContext(profileDir || PROFILE_ROOT, Boolean(control?.headless));
   try {
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(home, { waitUntil: "domcontentloaded", timeout: 60000 });
     // 扫码授权必须让用户看得见：把浏览器窗口摆到屏幕内并置前。
     // （桌面端已不再收编这个窗口 —— 用户反馈侧栏里「来回乱跳」反而更难用。）
     await revealBrowserWindow(page);
-    if (await isLoggedIn(context, type)) return;
+    if (await isLoggedIn(context, type)) return await captureSession(context, platform);
     await assertPlatformAccessible(page, type);
-    log(`请在弹出的豆包浏览器窗口里扫码登录 ${label}（${home}），完成后会自动继续`);
+    log(
+      `请在弹出的豆包窗口里扫码登录 ${label}（${home}）。` +
+        `登录完成后点软件里的「完成」继续；想一次加多个账号，就用窗口里的「更多账号 → 添加账号」。`,
+    );
     // Dola 页面较重，实测等待期间偶发 renderer 崩溃（自动探针里复现过）。
     // 崩了就把登录页**换一个新页**重开继续等，而不是直接失败让用户从头再来。
     // （必须换新页：崩溃后的 page 对象已经不可用，继续用它只会连环报错。）
@@ -1295,8 +1462,19 @@ export async function openLogin(profileDir?: string, accountType?: string): Prom
     let activePage = page;
     page.on("crash", () => { crashed = true; });
     const deadline = Date.now() + LOGIN_TIMEOUT_MS;
+    // 登录成功后**不能立刻收工**：豆包支持一个浏览器登多个账号，用户很可能正接着加号。
+    // 所以登录成功后先看一段「静默时间」—— 只要 multi_sids / cookie 还在变就重新计时，
+    // 静默满 AUTO_FINISH_MS 才自动收工；用户点「完成」则立刻收工。
+    const AUTO_FINISH_MS = 8000;
+    let settledAt = 0;
+    let lastSignal = "";
     while (Date.now() < deadline) {
+      // 用户点了「取消」—— 立刻收工（否则这个函数会一直占着"忙碌"状态到超时）。
+      if (control?.signal?.aborted) throw new Error("已取消登录");
+      // 用户把登录窗口关掉了 —— 同样立刻收工，别让他白等 10 分钟。
+      if (!context.pages().length) throw new Error(`${label}登录窗口已关闭，已取消登录`);
       await activePage.waitForTimeout(2000).catch(() => undefined);
+      if (control?.signal?.aborted) throw new Error("已取消登录");
       if (crashed) {
         crashed = false;
         log("登录页崩溃，正在重新打开登录页…");
@@ -1310,8 +1488,22 @@ export async function openLogin(profileDir?: string, accountType?: string): Prom
         continue;
       }
       await assertPlatformAccessible(activePage, type);   // 地区受限就别让用户干等
-      if (await isLoggedIn(context, type)) return;
+      if (!(await isLoggedIn(context, type))) continue;
+
+      const signal = `${await readMultiSids(context, home)}|${(await context.cookies(home).catch(() => []) as any[]).length}`;
+      const now = Date.now();
+      if (!settledAt || signal !== lastSignal) {
+        if (settledAt) log("又检测到新的豆包账号，继续等待…");
+        settledAt = now;
+        lastSignal = signal;
+        continue;
+      }
+      if (control?.shouldFinish?.() || now - settledAt >= AUTO_FINISH_MS) {
+        return await captureSession(context, platform);
+      }
     }
+    // 超时了，但确实已经登录成功 —— 照样把登录态交出去，别让用户白扫一次。
+    if (await isLoggedIn(context, type)) return await captureSession(context, platform);
     throw new Error(`${label}登录超时，请重新发起登录`);
   } finally {
     await context.close().catch(() => undefined);
@@ -1489,7 +1681,7 @@ async function fetchDoubaoIdentity(context: any): Promise<{ userId: string; name
  * 读一个 profile 当前的登录身份（升级兼容用，见 importCookies 里的对齐步骤）。
  * 读不到就返回空，不抛。
  */
-async function readProfileIdentity(
+export async function readProfileIdentity(
   profileDir: string,
 ): Promise<{ sessionId: string; userId: string; name: string }> {
   const empty = { sessionId: "", userId: "", name: "" };

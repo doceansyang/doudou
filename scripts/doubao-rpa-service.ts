@@ -24,14 +24,23 @@
  *   GET    /health              服务状态
  *   GET    /accounts            账号列表（含平台、今日已用/剩余额度）
  *   POST   /accounts            新增账号并扫码登录   body { name, accountType: "doubao" | "dola" }
+ *                               ⚠️ 这是个**长请求**（登录窗一直开着，最长 10 分钟）；
+ *                               客户端应轮询 GET /accounts 判断是否登录成功，用
+ *                               POST /accounts/cancel-login 打断，或
+ *                               POST /accounts/finish-login 让用户点「完成」立刻收工。
+ *                               ⭐ 会把登录窗里**所有**已登录豆包账号一次全收进来
+ *                               （豆包支持一个浏览器登多个账号）。
+ *   POST   /accounts/cancel-login    取消正在进行的扫码登录（关掉等待，释放忙碌状态）
+ *   POST   /accounts/finish-login    用户点「完成」：立刻读取登录窗里的账号并落库
  *   POST   /accounts/import-cookies  用「豆包账号桥」扩展送来的 cookie 建账号（不扫码）
- *        body { name, accountType, cookies: chrome.cookies.Cookie[] }
+ *        body { name, accountType, cookies: chrome.cookies.Cookie[], browserAccounts, multiSidsRaw }
+ *        browserAccounts = multi_sids 解析出的全部账号 ⇒ 一次把浏览器里的多个账号都建出来
  *   POST   /accounts/:id/login  重新扫码登录
  *   DELETE /accounts/:id        删除账号
  *   POST   /generate            生成视频（自动选号，返回 base64）
  */
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   ACCOUNT_PLATFORMS,
@@ -49,9 +58,11 @@ import {
   releaseBusy,
   remainingQuota,
   removeAccount,
+  setAccountIdentity,
   today,
   usedToday,
   type AccountType,
+  type DoubaoAccount,
 } from "./doubao-accounts.ts";
 
 const PORT = Number(process.env.DOUBAO_RPA_PORT || 18077);
@@ -158,26 +169,110 @@ async function generate(payload: any): Promise<GenerateResult> {
   }
 }
 
-/** 新增账号：创建记录 → 打开对应平台的浏览器窗口扫码。 */
+/**
+ * 当前正在进行的扫码登录（用于「取消」）。
+ *
+ * 为什么必须有：`openLogin()` 最长会等 10 分钟，期间 `running` 一直是 true。
+ * 用户点了取消却没人通知服务端的话，他要等满 10 分钟才能再点一次 —— 体验是坏的。
+ */
+let loginAbort: AbortController | null = null;
+/** 用户在界面上点了「完成」—— 让登录等待立刻收工并把登录态交出去。 */
+let loginFinish = false;
+
+/**
+ * 打开登录窗并等它登录完成，返回捞到的登录态（**含窗口里登录的全部豆包账号**）。
+ *
+ * 可被 `/accounts/cancel-login` 打断，也可被 `/accounts/finish-login` 提前收工。
+ */
+async function runLogin(profileDir: string, accountType: AccountType): Promise<any> {
+  const controller = new AbortController();
+  loginAbort = controller;
+  loginFinish = false;
+  try {
+    const core = await loadCore();
+    return await core.openLogin(profileDir, accountType, {
+      signal: controller.signal,
+      shouldFinish: () => loginFinish,
+    });
+  } finally {
+    loginAbort = null;
+    loginFinish = false;
+  }
+}
+
+/**
+ * 新增账号：打开登录窗扫码。
+ *
+ * ⭐ 关键：豆包**支持一个浏览器登多个账号**（窗口里的「更多账号 → 添加账号」），
+ * 所以这里不是「扫一个建一个」，而是**把登录窗里的全部账号一次全收进来** ——
+ * 跟「从本机浏览器拉取」走完全相同的落库路径（`importCookies`），行为一致。
+ */
 async function createAccount(
   name?: string,
   accountType: AccountType = "doubao",
-): Promise<{ ok: boolean; error?: string; id?: string; name?: string; accountType?: AccountType }> {
+): Promise<{
+  ok: boolean;
+  error?: string;
+  id?: string;
+  name?: string;
+  accountType?: AccountType;
+  /** 本次一共收进几个账号（含登录窗里额外登录的）。 */
+  total?: number;
+}> {
   if (running) return { ok: false, error: "生成任务执行中，无法同时扫码登录" };
   running = true;
+  const type = normalizeAccountType(accountType);
+  let account: DoubaoAccount | null = null;
+  let core: Awaited<ReturnType<typeof loadCore>> | null = null;
   try {
-    const type = normalizeAccountType(accountType);
-    const account = await addAccount(name, type);
-    await log(`新增账号「${account.name}」（${ACCOUNT_PLATFORMS[type].label}），打开扫码窗口…`);
-    const core = await loadCore();
+    // 先建一条记录：登录窗就用它的 profile，登录态直接留在里面，不用来回搬。
+    account = await addAccount(name, type);
+    await log(`新增账号「${account.name}」（${ACCOUNT_PLATFORMS[type].label}），打开登录窗口…`);
     // 平台必须一路传到核心：站点地址、登录判据、页面控件都按它分支
-    await core.openLogin(account.profileDir, type);
-    await markLoggedIn(account.id, true);
-    await log(`账号「${account.name}」登录成功`);
-    return { ok: true, id: account.id, name: account.name, accountType: type };
+    core = await loadCore();
+    const captured = await runLogin(account.profileDir, type);
+    if (!captured?.sessionId) throw new Error("没读到豆包登录态，请重试");
+
+    // 当前这个号 → 就用刚建的记录（登录态已经在它的 profile 里了）。
+    const me = (captured.browserAccounts ?? []).find((item: any) => item.sessionId === captured.sessionId);
+    await setAccountIdentity(account.id, {
+      uid: captured.userId || me?.uid || "",
+      fingerprint: captured.fingerprint,
+      name: captured.nickname,
+      hasLoggedIn: true,
+    });
+
+    // 窗口里还登了别的号 → 一并收进来（豆包多账号）。
+    const extra = (captured.browserAccounts ?? []).filter((item: any) => item.sessionId !== captured.sessionId);
+    let others: string[] = [];
+    if (extra.length) {
+      const imported = await core.importCookies({ cookies: [], accountType: type, browserAccounts: extra });
+      others = (imported?.accounts ?? []).map((item: any) => item.name);
+      await log(`登录窗口里还登录了 ${others.length} 个豆包账号：${others.join("、")} —— 已一并加入`);
+    }
+    const total = 1 + others.length;
+    await log(`账号「${captured.nickname || account.name}」登录成功（本次共收进 ${total} 个账号）`);
+    return { ok: true, id: account.id, name: captured.nickname || account.name, accountType: type, total };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await log(`新增账号失败：${message}`);
+    await log(`新增账号未完成：${message}`);
+    // ⚠️ 别在账号池里留一个永远登录不上的空壳：先确认 profile 里**确实没有**登录态，
+    // 再把刚建的这条记录删掉。（首次引导时用户点了取消，账号池必须保持干净。）
+    if (account) {
+      let sessionId = "";
+      try {
+        sessionId = (await (core ?? (await loadCore())).readProfileIdentity(account.profileDir)).sessionId;
+      } catch { /* 读不到就按没登录处理 */ }
+      if (sessionId) {
+        await markLoggedIn(account.id, true);
+        await log(`账号「${account.name}」其实已经登录成功，保留`);
+        return { ok: true, id: account.id, name: account.name, accountType: type, total: 1 };
+      }
+      await removeAccount(account.id);
+      // profile 目录也一起删掉（是这次刚建的），别在 ~/.toonflow-doubao-accounts 里留垃圾。
+      await rm(account.profileDir, { recursive: true, force: true }).catch(() => undefined);
+      await log(`已清理没登录成功的新账号「${account.name}」`);
+    }
     return { ok: false, error: message };
   } finally {
     running = false;
@@ -191,9 +286,14 @@ async function loginAccount(id: string): Promise<{ ok: boolean; error?: string }
     const accounts = await loadAccounts();
     const account = accounts.find((a) => a.id === id);
     if (!account) return { ok: false, error: "账号不存在" };
-    const core = await loadCore();
-    await core.openLogin(account.profileDir, account.accountType);
-    await markLoggedIn(account.id, true);
+    const captured = await runLogin(account.profileDir, account.accountType);
+    // 顺手把平台 uid / 昵称刷新一下（重新扫码可能是同一个号的另一份登录态）。
+    await setAccountIdentity(account.id, {
+      uid: captured?.userId || account.doubaoUid,
+      fingerprint: captured?.fingerprint || account.sessionFingerprint,
+      name: captured?.nickname || account.name,
+      hasLoggedIn: true,
+    });
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -355,6 +455,31 @@ async function remove(id) {
   show("已删除");
   refresh();
 }
+/* ---------- 浏览器内核（扫码登录 / 生成都跑在它里面） ---------- */
+async function loadBrowser() {
+  const box = document.getElementById("browserMsg");
+  const res = await fetch("/browser").then(r => r.json()).catch(() => null);
+  if (!res || !res.ok) { if (box) box.textContent = "读不到浏览器设置"; return; }
+  const sel = document.getElementById("browserSel");
+  sel.innerHTML = res.candidates.length
+    ? res.candidates.map(c => \`<option value="\${c.path}"\${c.path === res.current ? " selected" : ""}>\${c.name}</option>\`).join("")
+    : '<option value="">（没找到 Chrome / Edge）</option>';
+  if (box) box.textContent = res.source ? "来源：" + res.source : "";
+}
+async function applyBrowser() {
+  const path = document.getElementById("browserSel").value;
+  if (!path) return;
+  if (!confirm("换浏览器内核会让**已有账号的登录态全部失效**（cookie 加密绑定到具体浏览器），需要重新扫码。确定要换吗？")) return;
+  const res = await fetch("/browser", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }),
+  }).then(r => r.json()).catch(() => null);
+  const box = document.getElementById("browserMsg");
+  if (box) box.textContent = res && res.ok ? "已切换（已有账号可能需要重新扫码）" : ("失败：" + ((res && res.error) || ""));
+  loadBrowser();
+}
+document.getElementById("saveBrowser").addEventListener("click", applyBrowser);
+loadBrowser();
+
 refresh();
 setInterval(refresh, 5000);
 `;
@@ -417,7 +542,13 @@ function renderPage(): string {
 <div class="tip" style="margin:10px 0 14px">
   <b>想省掉扫码？</b>浏览器里已经登录了豆包的话，装一次
   <a href="/extension" target="_blank">豆包账号桥扩展</a>，
-  之后登录态会自动同步进来。
+  之后登录态会自动同步进来（**装哪个浏览器就同步哪个，不需要在这里选**）。
+</div>
+<div class="bar" style="margin-bottom:14px">
+  <span style="font-size:13px;color:#9aa4b5">扫码/生成用的浏览器</span>
+  <select id="browserSel" style="padding:8px 12px;border-radius:8px;border:1px solid #2b3140;background:#14171f;color:#e6e9f0;font-size:13px"></select>
+  <button id="saveBrowser">应用</button>
+  <span id="browserMsg" class="tip" style="margin:0;flex:0 1 auto"></span>
 </div>
 <div id="list">加载中…</div>
 <script>${PAGE_SCRIPT}</script></body></html>`;
@@ -557,6 +688,25 @@ async function route(request: Request): Promise<Response> {
       });
     }
 
+    // 扫码登录 / 生成跑在哪个浏览器内核里（换内核会让已有登录态失效，界面上要警示）。
+    if (pathname === "/browser" && request.method === "GET") {
+      const core = await loadCore();
+      return Response.json({ ok: true, ...core.browserState() });
+    }
+    if (pathname === "/browser" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const target = String(body?.path ?? "").trim();
+      const core = await loadCore();
+      const usable = (core.listInstalledBrowsers() as Array<{ path: string }>).some((item) => item.path === target);
+      if (!target || !usable || !existsSync(target)) {
+        return Response.json({ ok: false, error: "这个浏览器不在可用列表里（只认本机的 Chrome / Edge）" });
+      }
+      const before = core.browserState().current as string;
+      core.saveBrowser(target);
+      await log(`浏览器内核切换：${before || "(未设置)"} → ${target}（已有账号的登录态可能失效，需要重新扫码）`);
+      return Response.json({ ok: true, ...core.browserState() });
+    }
+
     if (pathname === "/health") {
       return Response.json({ ok: true, service: "doubao-rpa", busy: running, port: PORT });
     }
@@ -592,6 +742,22 @@ async function route(request: Request): Promise<Response> {
     if (pathname === "/accounts/import-cookies" && request.method === "POST") {
       const body = await request.json().catch(() => ({}));
       return Response.json(await importCookiesAccount(body ?? {}));
+    }
+
+    // 取消正在进行的扫码登录（`POST /accounts` 最长会等 10 分钟，得能打断）。
+    if (pathname === "/accounts/cancel-login" && request.method === "POST") {
+      if (!loginAbort) return Response.json({ ok: false, error: "当前没有正在进行的扫码登录" });
+      loginAbort.abort();
+      await log("收到取消请求，已中断扫码登录等待");
+      return Response.json({ ok: true });
+    }
+
+    // 用户点「完成」：立刻把登录窗里的登录态收下来（想多登几个号就先登完再点）。
+    if (pathname === "/accounts/finish-login" && request.method === "POST") {
+      if (!loginAbort) return Response.json({ ok: false, error: "当前没有正在进行的扫码登录" });
+      loginFinish = true;
+      await log("收到「完成」：正在读取登录窗口里的账号…");
+      return Response.json({ ok: true });
     }
 
     const loginMatch = /^\/accounts\/([^/]+)\/login$/.exec(pathname);    if (loginMatch && request.method === "POST") {

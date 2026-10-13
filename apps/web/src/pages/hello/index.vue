@@ -28,7 +28,7 @@
       </div>
       <div v-else class="welcomeContent">
         <h1 id="welcomeTitle">快速开始</h1>
-        <p class="description">用本机浏览器里已登录的豆包账号即可开始创作，无需注册。</p>
+        <p class="description">无需注册。自动获取本机已登录的豆包账号；没有会为你打开登录窗口，扫码一次即可开始。</p>
 
         <!-- 两个动作按钮**同一规格**（宽/高/内边距/圆角/字号/字重完全一致），
              先后顺序即主次：先「用本地豆包账号」，再「登录 Linke」。 -->
@@ -59,6 +59,23 @@
       <div class="artBrand">
         <span class="artLogo" v-html="logoSvg" />
         <span class="artName">JinyuTV</span>
+      </div>
+    </div>
+
+    <!-- 等待扫码：登录窗是**独立的操作系统窗口**（不是本页里的弹层），
+         这一层只负责「告诉用户去哪儿操作 + 让等待可以取消」。 -->
+    <div v-if="scanning" class="scanOverlay" role="status" aria-live="polite">
+      <div class="scanCard">
+        <span class="scanSpinner" aria-hidden="true" />
+        <h2>请在窗口里扫码登录豆包</h2>
+        <p>登录窗口已经为你打开（若没看到，请在任务栏里找一下）。登录完成后会自动继续，也可以直接点「完成」。账号只保存在本机。</p>
+        <p class="scanTip">
+          <strong>想一次加多个豆包账号？</strong>在该窗口里点头像 →「更多账号」→「添加账号」，把号都登好再点「完成」，它们会一起进来。
+        </p>
+        <div class="scanActions">
+          <el-button type="primary" round :loading="finishing" @click="finishScan">{{ finishing ? "正在读取…" : "完成" }}</el-button>
+          <el-button round :disabled="finishing" @click="cancelScan">取消</el-button>
+        </div>
       </div>
     </div>
   </main>
@@ -107,24 +124,61 @@ function openLogin() {
 
 /** 本机豆包账号池服务（随主服务自动启动），与 provider 里的默认地址一致。 */
 const RPA_URL = "http://127.0.0.1:18077";
+/** 扫码等待上限，与后端 openLogin 的 LOGIN_TIMEOUT_MS 对齐（10 分钟）。 */
+const SCAN_TIMEOUT_MS = 10 * 60 * 1000;
 
 type LocalAccount = { id: string; name: string; hasLoggedIn: boolean; remaining: number };
 
-async function fetchLocalAccounts(): Promise<LocalAccount[]> {
-  const response = await axios.get<{ accounts?: LocalAccount[] }>(`${RPA_URL}/accounts`, { timeout: 6000 });
+/** 是否正在等用户扫码（决定遮罩与取消入口）。 */
+const scanning = ref(false);
+/** 用户是否已点「完成」，正在等后端把登录态读出来。 */
+const finishing = ref(false);
+let scanCancelled = false;
+
+async function fetchLocalAccounts(timeout = 6000): Promise<LocalAccount[]> {
+  const response = await axios.get<{ accounts?: LocalAccount[] }>(`${RPA_URL}/accounts`, { timeout });
   return Array.isArray(response.data?.accounts) ? response.data.accounts : [];
 }
 
+/** RPA 服务当前是否在忙（扫码登录期间为 true；登录窗被关掉后会变回 false）。 */
+async function fetchRpaBusy(): Promise<boolean | null> {
+  try {
+    const response = await axios.get<{ busy?: boolean }>(`${RPA_URL}/health`, { timeout: 4000 });
+    return typeof response.data?.busy === "boolean" ? response.data.busy : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 能直接用的账号：已登录 + 今天还有额度。 */
+function pickUsable(accounts: LocalAccount[]): LocalAccount | undefined {
+  return accounts.find(account => account.hasLoggedIn && account.remaining > 0);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => { window.setTimeout(resolve, ms); });
+}
+
+async function enterWorkspace(accountName?: string) {
+  await hello.complete();
+  anonymousData.track("onboarding.complete");
+  ElMessage.success(accountName ? `已获取本地账号：${accountName}` : "已开始使用");
+  await router.replace("/home");
+}
+
 /**
- * 「一键获取本地账号」——直接拿本机浏览器里已登录的豆包账号开始创作。
+ * 「一键获取本地账号」——**新老用户共用这一个按钮**：
+ *   1) 本机账号池里有可用账号 → 直接用，进创作；
+ *   2) 没有（新用户）→ **自动打开豆包登录窗口**（窗口会置顶），扫码一次即完成，
+ *      登录成功后自动继续，用户不需要去别处装任何东西。
  *
- * 这里**不搬 cookie**：搬 cookie 必须由「豆包账号桥」扩展在浏览器里完成
- * （浏览器禁止外部程序读取 cookie 存储，见 tools/doubao-cookie-bridge/）。
- * 这个按钮负责的是「检测本机有没有可用账号」并把结果如实告诉用户，
- * 有就放行进入，没有就给出两条明确出路，而不是让人卡在这一屏。
+ * ⚠️ 为什么不能「直接读用户在别处登录的账号」：浏览器从 Chromium 127 起对 cookie 库
+ * 启用 App-Bound 加密，外部程序离线解不开，绕过它要提权或注入浏览器（我们不做）。
+ * 所以「一键」的准确含义是：**软件替你打开登录窗口 + 自动检测登录结果**；
+ * 扫码一次后登录态长期留在本机，之后完全不用再登。
  */
 async function useLocalAccount() {
-  if (saving.value) return;
+  if (saving.value || scanning.value) return;
   saving.value = true;
   try {
     let accounts: LocalAccount[];
@@ -134,21 +188,89 @@ async function useLocalAccount() {
       ElMessage.warning("没连上本机的豆包服务，请稍后重试；或先用「登录 Linke 自动配置」。");
       return;
     }
-    const usable = accounts.filter(account => account.hasLoggedIn && account.remaining > 0);
-    if (!usable.length) {
-      ElMessage.warning("还没检测到本地豆包账号。请在浏览器登录豆包并装好「豆包账号桥」扩展，或先点「登录 Linke 自动配置」。");
+    const ready = pickUsable(accounts);
+    if (ready) {
+      await enterWorkspace(ready.name);
       return;
     }
-    // 沿用现有供应商设置：豆包账号是内置供应商，无需额外写 key。
-    await hello.complete();
-    anonymousData.track("onboarding.complete");
-    ElMessage.success(`已获取本地账号：${usable[0].name}`);
-    await router.replace("/home");
+
+    // 没有可用账号 —— 打开登录窗口等扫码（新用户就是在这一步「获取」）。
+    if (!(await openScanLogin())) return; // 取消 / 超时 / 窗口被关，原因已在里面说明
+    const after = await fetchLocalAccounts().catch(() => [] as LocalAccount[]);
+    const picked = pickUsable(after) ?? after.find(account => account.hasLoggedIn);
+    await enterWorkspace(picked?.name);
   } catch {
     ElMessage.error("获取本地账号失败，请重试");
   } finally {
     saving.value = false;
   }
+}
+
+/**
+ * 打开豆包登录窗并等登录完成，返回是否登录成功。
+ *
+ * 后端的 `POST /accounts` 是个**长请求**（登录窗要一直开着，最长 10 分钟），
+ * 所以这里**不等它返回**，改为轮询账号池 —— 一出现账号就立刻继续，最跟手；
+ * 同时看 `/health` 的 busy 标志，窗口被关掉或等待结束就收工，不让用户对着遮罩空等。
+ */
+async function openScanLogin(): Promise<boolean> {
+  scanning.value = true;
+  finishing.value = false;
+  scanCancelled = false;
+  // 这个 POST 没人 await，失败必须自己吞掉，否则控制台会报未捕获异常。
+  void axios
+    .post(`${RPA_URL}/accounts`, { accountType: "doubao" }, { timeout: SCAN_TIMEOUT_MS + 20000 })
+    .catch(() => undefined);
+  try {
+    const deadline = Date.now() + SCAN_TIMEOUT_MS;
+    let opened = false;
+    let idle = 0;
+    while (Date.now() < deadline) {
+      await delay(2000);
+      if (scanCancelled) return false;
+
+      const list = await fetchLocalAccounts().catch(() => [] as LocalAccount[]);
+      if (list.some(account => account.hasLoggedIn)) return true;
+
+      const busy = await fetchRpaBusy();
+      if (busy === true) {
+        opened = true;
+        idle = 0;
+        continue;
+      }
+      if (busy === false) {
+        // 起浏览器要一点时间；还没等到窗口打开就先多等两轮。
+        if (!opened && ++idle < 4) continue;
+        ElMessage.warning(opened ? "登录窗口已关闭，还没完成登录。可以再点一次「一键获取本地账号」。" : "没能打开登录窗口，请重试。");
+        return false;
+      }
+    }
+    ElMessage.warning("等待扫码超时了，可以再点一次「一键获取本地账号」。");
+    return false;
+  } finally {
+    scanning.value = false;
+    finishing.value = false;
+  }
+}
+
+/**
+ * 用户点「完成」：通知后端立刻收工并把登录窗里的账号全部读出来。
+ *
+ * **不用在这里等结果** —— 后端落库后，`openScanLogin` 的轮询会看到账号并自动进入。
+ * 这条也支持「一次加多个账号」：用户可以先在窗口里用「更多账号 → 添加账号」多登几个，
+ * 登完再点「完成」，它们会一起进来（跟从本机浏览器拉取是同一条落库路径）。
+ */
+async function finishScan() {
+  if (finishing.value) return;
+  finishing.value = true;
+  await axios.post(`${RPA_URL}/accounts/finish-login`, {}, { timeout: 8000 }).catch(() => undefined);
+}
+
+/** 取消扫码：必须通知后端 —— 否则它会一直等到 10 分钟超时，期间不让再登录。 */
+async function cancelScan() {
+  scanCancelled = true;
+  await axios.post(`${RPA_URL}/accounts/cancel-login`, {}, { timeout: 5000 }).catch(() => undefined);
+  ElMessage.info("已取消登录");
 }
 
 async function completeSetup() {
@@ -500,6 +622,69 @@ onBeforeUnmount(() => {
     }
   }
 
+  /* 等待扫码遮罩：登录窗是独立的系统窗口，这里只负责说明 + 提供取消。
+     用主题变量配色，浅色/深色主题都跟着走。 */
+  .scanOverlay {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: rgb(0 0 0 / 45%);
+
+    .scanCard {
+      width: min(420px, 100%);
+      padding: 28px 24px;
+      text-align: center;
+      border: 1px solid var(--el-border-color-lighter);
+      border-radius: calc(var(--ui-radius) * 1.5);
+      background: var(--el-bg-color);
+      color: var(--el-text-color-primary);
+      box-shadow: 0 18px 48px rgb(0 0 0 / 28%);
+
+      h2 {
+        margin: 18px 0 10px;
+        font-size: 17px;
+        font-weight: 650;
+      }
+
+      p {
+        margin: 0 0 20px;
+        color: var(--el-text-color-secondary);
+        font-size: 13px;
+        line-height: 1.8;
+      }
+
+      /* 「想一次加多个账号」的提示 —— 用弱底色块跟正文拉开层次 */
+      .scanTip {
+        margin-top: -8px;
+        padding: 10px 12px;
+        border-radius: var(--ui-radius);
+        background: var(--el-fill-color-light);
+        color: var(--el-text-color-regular);
+        text-align: start;
+      }
+
+      .scanActions {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+      }
+    }
+
+    .scanSpinner {
+      display: inline-block;
+      width: 34px;
+      height: 34px;
+      border: 3px solid var(--el-border-color);
+      border-top-color: var(--el-color-primary);
+      border-radius: 50%;
+      animation: helloScanSpin 0.9s linear infinite;
+    }
+  }
+
   @media (max-width: 700px) {
     grid-template-columns: 1fr;
 
@@ -519,6 +704,13 @@ onBeforeUnmount(() => {
     .artPanel {
       display: none;
     }
+  }
+}
+
+/* keyframes 必须放在选择器外面（放 .hello 里会编译出非法嵌套规则）。 */
+@keyframes helloScanSpin {
+  to {
+    transform: rotate(360deg);
   }
 }
 </style>
