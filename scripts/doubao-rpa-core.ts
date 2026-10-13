@@ -1,4 +1,5 @@
 import type { GenerateMedia, MediaAsset, VideoRequest } from "@toonflow/providers";
+import { createDecipheriv, createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -1116,6 +1117,151 @@ function pickMediaUrl(urls: string[]): string {
   return scored.length && scored[0].score > 0 ? scored[0].url : "";
 }
 
+/* ------------------------------------------------- 原片（无水印）解析 */
+
+/**
+ * fplay 解密用的 KDF 盐。
+ * ⚠️ 与 CDTV（`original_doubao_nomark.py`）里的常量逐字一致，改动会导致解不出地址。
+ */
+const FPLAY_KDF_SALT =
+  "TdTC5rgxYgkOUrPHpnM7pByyRiuCmrWKGWs521cXdST0m69/COjWjSanLjfBqVovHwWlGJKu8pSXMrYqOKrdWA==";
+
+/** fplay 的密文与 key_seed 都是 base64url。 */
+function base64UrlToBuffer(value: string): Buffer {
+  const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(normalized + "=".repeat((4 - (normalized.length % 4)) % 4), "base64");
+}
+
+/**
+ * 解密 fplay 的媒体地址。
+ *
+ * 算法照搬 CDTV（`original_doubao_nomark.py` 的 `_decode_fplay_url`）：
+ *   key = sha512( sha512(seed) ++ salt ) 的前 16 字节，iv = 同一哈希的 16..32 字节，
+ *   AES-128-CBC，PKCS#7 去填充。解密结果不是 http(s) 开头就说明解错了
+ *   —— 返回空串让调用方跳过，不抛异常（fplay 里混着非地址字段是常态）。
+ */
+export function decodeFplayUrl(value: unknown, keySeed: string): string {
+  const text = String(value ?? "").replace(/&amp;/g, "&").trim();
+  if (!text) return "";
+  if (/^https?:\/\//.test(text)) return text;
+  try {
+    const encrypted = base64UrlToBuffer(text);
+    const seed = base64UrlToBuffer(keySeed);
+    const ciphertext = encrypted.subarray(4);
+    if (seed.length < 32 || !ciphertext.length || ciphertext.length % 16) return "";
+    const first = createHash("sha512").update(seed).digest();
+    const derived = createHash("sha512")
+      .update(Buffer.concat([first, base64UrlToBuffer(FPLAY_KDF_SALT)]))
+      .digest();
+    const decipher = createDecipheriv(
+      "aes-128-cbc",
+      derived.subarray(0, 16),
+      derived.subarray(16, 32),
+    );
+    const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const padding = plain[plain.length - 1];
+    const body = padding >= 1 && padding <= 16 ? plain.subarray(0, plain.length - padding) : plain;
+    const url = body.toString("utf8").trim();
+    return /^https?:\/\//.test(url) ? url : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 整理 fplay 请求地址：删掉 `force_fids` / `logo_type` / `codec_type`，再固定 `codec_type=1`。
+ * 与 CDTV 的 `_clean_fplay_api_url` 等价 —— 参数不同会拿到不带原片的返回。
+ */
+export function cleanFplayApiUrl(raw: string): string {
+  try {
+    const url = new URL(String(raw).replace(/&amp;/g, "&"));
+    for (const key of ["force_fids", "logo_type", "codec_type"]) url.searchParams.delete(key);
+    url.searchParams.set("codec_type", "1");
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 从抓回的 mp4 里读出 `comment=vid:vXXXX`。
+ *
+ * 豆包成片的 video_id 就写在这个元数据标签里，**不需要另外抓**（CDTV 也是这么取的）。
+ * 只扫前 512 KiB：这个标签在 moov 里，位置很靠前，全量扫没必要。
+ */
+export function extractVideoId(bytes: Uint8Array): string {
+  const head = Buffer.from(bytes.subarray(0, Math.min(bytes.length, 512 * 1024))).toString("latin1");
+  const matched = /vid:(v[0-9a-zA-Z]{10,})/.exec(head);
+  return matched ? matched[1] : "";
+}
+
+/**
+ * 用页面自己的 fplay 请求换**无水印原片**地址。
+ *
+ * 为什么非要走这一步（2026-10-13 实测，别再退回老路）：
+ *   · 我们抓网络响应体拿到的是**播放用的水印版**，不是原片；
+ *   · `POST /samantha/media/get_play_info` 能通、也返回 `original_media_info.main_url`，
+ *     但那个地址仍带 `lr=video_gen_watermark_dyn` —— **依然是水印版**（实测 1,578,983 字节）；
+ *     把 lr 改写成 `video_gen_no_watermark` 无效（CDTV 已证同一文件同一 SHA）；
+ *   · 真正的原片只在 fplay 的返回里：请求 URL 带 `key_seed` → `video_list` 中
+ *     **`logo_type` 为空**的项 → 用 key_seed 解密出的地址**不含 watermark** 才是原片；
+ *   · fplay 请求**只在登录态页面真正播放时才出现**（分享页拿不到），所以只能从本次
+ *     生成的网络流量里截 —— 那就是下面 `fplayApis` 的用途。
+ */
+async function resolveOriginalViaFplay(
+  context: any,
+  candidates: string[],
+): Promise<{ url: string; definition: string; label: string } | null> {
+  const found: { url: string; definition: string; label: string; area: number }[] = [];
+  for (const raw of candidates) {
+    const api = cleanFplayApiUrl(raw);
+    if (!api || !api.includes("key_seed=")) continue;
+    let payload: any;
+    try {
+      const response = await context.request.get(api, {
+        headers: {
+          Accept: "application/json, text/plain, */*",
+          Referer: `${HOME}`,
+          Origin: "https://www.doubao.com",
+        },
+        timeout: 30000,
+      });
+      if (!response.ok()) continue;
+      payload = await response.json();
+    } catch {
+      continue;
+    }
+    // 返回结构容错：CDTV 里两种包法都见过。
+    const data = payload?.video_info?.data ?? payload?.data;
+    const keySeed = data?.key_seed;
+    const list = data?.video_list;
+    if (typeof keySeed !== "string" || !keySeed || !list || typeof list !== "object") continue;
+
+    for (const [definition, item] of Object.entries(list as Record<string, any>)) {
+      if (!item || typeof item !== "object") continue;
+      // logo_type 非空 = 这一档是带标记的版本，跳过。
+      if (String(item.logo_type ?? "").trim()) continue;
+      for (const field of ["main_url", "backup_url_1"]) {
+        const url = decodeFplayUrl(item[field], keySeed);
+        if (!url || /watermark/i.test(url)) continue;
+        const width = Number(item.vwidth ?? item.width ?? 0);
+        const height = Number(item.vheight ?? item.height ?? 0);
+        found.push({
+          url,
+          definition,
+          label: `${width || "?"}x${height || "?"}`,
+          area: width * height,
+        });
+        break;
+      }
+    }
+  }
+  if (!found.length) return null;
+  found.sort((left, right) => right.area - left.area);
+  log(`fplay 解析到无水印原片：${found[0].definition}（${found[0].label}）`);
+  return { url: found[0].url, definition: found[0].definition, label: found[0].label };
+}
+
 /* ------------------------------------------------------------------ 登录 */
 
 /** 打开浏览器让用户扫码；已登录则直接返回。传入 profileDir 即为「新增账号」。 */
@@ -1213,6 +1359,16 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     const onResponse = (res: any) => remember(String(res.url() || ""));
     page.on("request", onRequest);
     page.on("response", onResponse);
+
+    // 顺手截下 fplay 请求地址：成片的**原片**（无水印）只能从这里问出来，
+    // 而它只在「登录态页面真正播放」的那一刻出现 —— 也就是这次生成的过程里。
+    // 判据就是 query 里带 key_seed（CDTV 也是靠它认出 fplay 的）。
+    const fplayApis = new Set<string>();
+    const onFplayResponse = (res: any) => {
+      const url = String(res.url() || "");
+      if (url.includes("key_seed=")) fplayApis.add(url);
+    };
+    page.on("response", onFplayResponse);
 
     log("新建对话…");
     await openNewConversation(page);
@@ -1423,16 +1579,54 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     page.off("request", onRequest);
     page.off("response", onResponse);
     page.off("response", onMediaResponse);
+    page.off("response", onFplayResponse);
 
     if (blocked) throw new Error(blocked);
     if (!videoBytes) throw new Error("等待豆包出片超时，请重试");
+
+    // 拿到的字节流多半是**播放用的水印版**。豆包的原片只能从 fplay 问，
+    // 所以这里再走一步：换到无水印原片再落盘；换不到就如实标记，不假装成功
+    // （CDTV 的规矩：自动生成允许保留水印兜底，但必须标记出来）。
+    let watermarked = true;
+    const videoId = extractVideoId(videoBytes);
+    if (accountType === "doubao" && videoId && fplayApis.size) {
+      const original = await resolveOriginalViaFplay(context, [...fplayApis]).catch(() => null);
+      if (original) {
+        try {
+          const response = await context.request.get(original.url, { timeout: 120000 });
+          const body = await response.body();
+          if (response.ok() && body && body.length > 50_000) {
+            videoBytes = new Uint8Array(body);
+            resultUrl = original.url;
+            watermarked = false;
+            log(
+              `已换用无水印原片：${original.definition}（${original.label}，` +
+                `${(body.length / 1048576).toFixed(1)} MB）`,
+            );
+          } else {
+            log(`原片下载不完整（HTTP ${response.status?.() ?? "?"}），沿用带水印成片`);
+          }
+        } catch (error) {
+          log(`原片下载失败，沿用带水印成片：${String(error).slice(0, 120)}`);
+        }
+      }
+    }
+    if (watermarked) {
+      log(
+        `⚠️ 未能取到无水印原片，本次成片可能带豆包水印` +
+          `（video_id=${videoId || "未识别"}，捕获 fplay 请求 ${fplayApis.size} 条）`,
+      );
+    }
 
     const outputDir = resolve(process.cwd(), "assets", "generated");
     await mkdir(outputDir, { recursive: true });
     const name = `doubao-${Date.now()}-${fileNameSafe(String(request.prompt || "").slice(0, 24) || "video")}.mp4`;
     const outputPath = resolve(outputDir, name);
     await writeFile(outputPath, videoBytes);
-    log(`成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）`);
+    log(
+      `成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）` +
+        `｜${watermarked ? "带水印（未取到原片）" : "已去水印（官方原片）"}`,
+    );
 
     return [
       {
@@ -1440,6 +1634,9 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
         type: "url",
         url: `file://${outputPath.replace(/\\/g, "/")}`,
         mimeType: "video/mp4",
+        // 附带的诚实标记：`true` = 这次没拿到原片，画面里可能带豆包水印。
+        // 画布目前不展示这个字段，但日志里会写明，便于事后核查（宁可标记也不假装成功）。
+        watermarked,
       } as MediaAsset,
     ];
   } finally {
