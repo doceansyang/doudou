@@ -728,7 +728,6 @@ onBeforeUnmount(() => {
           margin-top: 12px;
         }
       }
-
       .secondaryActions {
         display: flex;
         flex-wrap: wrap;
@@ -986,6 +985,23 @@ html.dark .pickerExisting {
   color: var(--el-text-color-primary);
   font-size: 13px;
   font-weight: 600;
+}
+
+/* 首屏两颗动作按钮（`.actionButton`，规格见上面 .welcomeContent 里那段）：
+   深色主题下主色是近黑 ⇒ 底色 #171717 与页面底 #141414 几乎同色（"看着不像按钮"），
+   悬停也只在近黑里挪一点点、等于没有反馈。按项目既有做法换成**中性底阶**：
+   常态比页面底亮一档、悬停再亮一档，且都走 EP 的 fill 变量 —— 浅色主题下主色本来
+   就是深底白字（清晰），所以只对深色生效，不动浅色。 */
+html.dark .actionButton {
+  --el-button-bg-color: var(--el-fill-color-light);
+  --el-button-border-color: transparent;
+  --el-button-text-color: var(--el-text-color-primary);
+  --el-button-hover-bg-color: var(--el-fill-color);
+  --el-button-hover-border-color: transparent;
+  --el-button-hover-text-color: var(--el-text-color-primary);
+  --el-button-active-bg-color: var(--el-fill-color-dark);
+  --el-button-active-border-color: transparent;
+  --el-button-active-text-color: var(--el-text-color-primary);
 }
 
 /* ⚠️ 本项目主色是**近黑**（#171717）：深色主题下 primary 按钮的底色也被算成近黑，
