@@ -117,6 +117,31 @@ def sync_provider_sources():
         print("--- 同步供应商适配器 -> %s（%d 个文件）" % (dst, n))
 
 
+def sync_ext():
+    """内置「文件扩展」（data/ext 下的 UMD 产物）是**运行时加载**的，改 packages/ext/**
+    后必须重建并铺到**两个位置**：`<实例>/build/ext`（内置源，启动时 initializeExt 从
+    这里同步）与 `<实例>/data/ext`（实际加载处）。`build_web` 不含它（有独立的 build:ext）。
+    ⚠️ 两处内容保持一致：initializeExt 看到 `previous === source` 会直接跳过，不会覆盖。"""
+    env = dict(build_env(), NODE_ENV="production")
+    proc = subprocess.run([BUN, "run", "--filter", "./packages/ext/*", "build"],
+                          cwd=PROJECT, env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        print((proc.stderr or proc.stdout or "")[-1200:])
+        raise SystemExit("!! 文件扩展构建失败")
+    src = os.path.join(PROJECT, "build", "ext")
+    names = [name for name in os.listdir(src) if name.endswith(".umd.js")]
+    for root in TARGETS:
+        if not os.path.isdir(root):
+            continue
+        for rel in (os.path.join("build", "ext"), os.path.join("data", "ext")):
+            dst = os.path.join(root, rel)
+            os.makedirs(dst, exist_ok=True)
+            for name in names:
+                shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
+        print("--- 同步文件扩展 -> %s（build/ext + data/ext，%d 个文件）" % (root, len(names)))
+
+
 def sync_rpa_scripts():
     """RPA（豆包浏览器自动化）跑的是**实例里 scripts/ 下的源码**（bun 直接跑 .ts），
     所以改了 RPA 相关文件必须同步过去，否则实例仍在跑旧代码（这个坑踩过一次：
@@ -211,5 +236,6 @@ if __name__ == "__main__":
     stop_ports()
     sync_provider_sources()
     sync_rpa_scripts()
+    sync_ext()
     restart_installed()
     check()

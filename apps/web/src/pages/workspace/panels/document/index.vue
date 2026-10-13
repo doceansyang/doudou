@@ -26,7 +26,7 @@ import editorHost from "./editorHost.vue";
 import { createDocumentSession, documentError, type DocumentSession, type EditorParams, type EditorView, type TabAction } from "./documentSession";
 import { theme } from "./theme";
 import { locale, t } from "@toonflow/i18n/vue";
-import { extensionCandidates, extensionRevision, listExtensions, resolveExtension } from "./extensions";
+import { candidateSuffixes, extensionCandidates, extensionRevision, listExtensions, resolveExtension } from "./extensions";
 import "dockview-vue/dist/styles/dockview.css";
 
 defineOptions({ components: { fileTree, editorHost } });
@@ -147,7 +147,11 @@ async function restoreLayout() {
 async function chooseExtension(resource: ExtResource, force: boolean) {
   const options = await extensionCandidates(resource);
   if (!options.length) throw new Error(`尚未启用支持此文件的扩展，请到插件市场安装或启用：${resource.label}`);
-  const key = resource.kind === "canvasNode" ? "canvasNode" : resource.path.split(".").at(-1)!.toLowerCase();
+  // 关联键取「真正匹配上的那个后缀」：`画布1.json.before-remove-apimart-20261012-172927`
+  // 应记为 json（而不是最后一截没法识别的时间戳），这样默认打开方式与记忆才落在正确的类型上。
+  const suffixes = resource.kind === "canvasNode" ? [] : candidateSuffixes(resource.path);
+  const key = resource.kind === "canvasNode" ? "canvasNode"
+    : (suffixes.find(suffix => options.some(option => option.extensions.includes(suffix))) ?? suffixes[0] ?? "");
   const associations = settings.value.documentExtensions as Record<string, string> | undefined;
   const defaultId = options.find(option => option.id === associations?.[key])?.id;
   if (!force && (defaultId || options.length === 1)) return resolveExtension(resource, defaultId ?? options[0]!.id);

@@ -114,16 +114,38 @@ export async function extensionCandidates(resource: ExtResource) {
   return matchingExtensions(resource);
 }
 
+/**
+ * 候选后缀：从最后一段开始往前找。
+ *
+ * 形如 `画布1.json.before-remove-apimart-20261012-172927` 的备份文件，最后一段是时间戳，
+ * 没有任何扩展认它 —— 但它们本质还是 json/文本。逐个往前回退就能正常打开，
+ * 而不是一点就报「未启用支持此文件的扩展」（用户看到会以为功能坏了）。
+ */
+export function candidateSuffixes(path: string): string[] {
+  return path.toLowerCase().split(".").slice(1).reverse();
+}
+
 function matchingExtensions(resource: ExtResource) {
-  const suffix = resource.path.split(".").at(-1)?.toLowerCase();
-  return definitions.value.filter(extension => extension.enabled && !extension.loadError && extension.resourceKind === resource.kind
-    && (resource.kind === "canvasNode" || extension.extensions.includes(suffix ?? "")));
+  if (resource.kind === "canvasNode") {
+    return definitions.value.filter(extension =>
+      extension.enabled && !extension.loadError && extension.resourceKind === "canvasNode");
+  }
+  const candidates = candidateSuffixes(resource.path);
+  return definitions.value.filter(extension =>
+    extension.enabled && !extension.loadError && extension.resourceKind === "file"
+    && candidates.some(suffix => extension.extensions.includes(suffix)));
 }
 
 export function extensionIcon(resource: ExtResource) {
   const candidates = matchingExtensions(resource);
-  const key = resource.kind === "canvasNode" ? "canvasNode" : resource.path.split(".").at(-1)!.toLowerCase();
-  return (candidates.find(extension => extension.id === extensionAssociations.value[key]) ?? (candidates.length === 1 ? candidates[0] : undefined))?.icon;
+  const suffixes = candidateSuffixes(resource.path);
+  if (resource.kind === "canvasNode") {
+    const preferred = candidates.find(extension => extension.id === extensionAssociations.value.canvasNode);
+    return (preferred ?? (candidates.length === 1 ? candidates[0] : undefined))?.icon;
+  }
+  const associated = candidates.find(extension =>
+    suffixes.some(suffix => extensionAssociations.value[suffix] === extension.id));
+  return (associated ?? (candidates.length === 1 ? candidates[0] : undefined))?.icon;
 }
 
 export function extensionConfig(id: string) {
