@@ -172,7 +172,10 @@ def build_stage():
         print("  %-13s %d 个文件" % (name, n))
 
     # 2) 根文件（含启动器的 WebView2 依赖与窗口图标）
-    for name in (["package.json", "start-server.bat", "启动JinyuTV.bat", "logo.ico", LAUNCHER_EXE]
+    #    ⚠️ logo.png 与 logo.ico **都要带**：授权/成功弹窗的品牌位优先读 logo.png
+    #    （见 launcher.cs 的 IconBox.LoadLogo）。曾经只带了 logo.ico，结果授权窗
+    #    顶部是一个**白底红叉**（实测复现）—— 客户第一次见到的就是这个坏画面。
+    for name in (["package.json", "start-server.bat", "启动JinyuTV.bat", "logo.ico", "logo.png", LAUNCHER_EXE]
                  + WV2_FILES):
         src = os.path.join(SOFTWARE, name)
         if os.path.isfile(src):

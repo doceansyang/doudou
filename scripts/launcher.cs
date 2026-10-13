@@ -921,8 +921,13 @@ class JinyuTVLauncher
                     // 后续重新打包替换 logo 时会失败（"文件正被另一进程使用"）。
                     byte[] bytes = File.ReadAllBytes(p);
                     using (var ms = new MemoryStream(bytes))
+                    using (var raw = Image.FromStream(ms))
                     {
-                        var img = Image.FromStream(ms);
+                        // ⚠️ 必须再拷成**独立位图**：GDI+ 对某些格式（实测 ICO）会延迟读取源流，
+                        //    一旦 ms 被释放，后面 DrawImage 就抛异常；WinForms 会把绘制失败的
+                        //    控件画成经典的「白底红叉」占位符。
+                        //    安装包里只有 logo.ico 时，授权窗顶部就是这个坏画面（已实测复现）。
+                        var img = new Bitmap(raw);
                         _logoCache = img;
                         _logoCachePath = p;
                         return img;
