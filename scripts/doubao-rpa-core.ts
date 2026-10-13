@@ -1,10 +1,11 @@
 import type { GenerateMedia, MediaAsset, VideoRequest } from "@toonflow/providers";
 import { createDecipheriv, createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ACCOUNT_PLATFORMS, normalizeAccountType, type AccountType } from "./doubao-accounts.ts";
+import { compareForWatermark } from "./doubao-watermark.ts";
 
 /**
  * 豆包账号（免费额度）视频生成 —— Toonflow 供应商实现。
@@ -1600,51 +1601,69 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     if (blocked) throw new Error(blocked);
     if (!videoBytes) throw new Error("等待豆包出片超时，请重试");
 
-    // 2026-10-13 实测结论（据此定行为，别再凭直觉改）：
-    //   **我们抓回的豆包成片本来就没有可见水印。** 证据两条：
-    //   ① 全时段右下角接触图（12 个时间点）里只有画面内容，没有任何字标；
-    //   ② 把成片与 fplay 问出来的「原片」逐像素对比 —— 平均绝对差 1.4~1.8/255、
-    //      差值 >30 的像素只占 0.000%~0.025%，即**两者是同一画面的不同编码**。
-    //   所以默认**不替换**：换成原片只是把成片重新编码一遍，实测码率还更低
-    //   （原片 1.32MB vs 成片 1.54MB），换过去等于降质。
-    //   而 CDTV 那个「角落水印」检测器在本片上是**误报**（花布背景的亮块满足了它的门限），
-    //   不能拿它当自动判据，更不能据此重编码。
-    //   fplay 解析能力保留：真在某个账号/档位上看到水印时，设 DOUBAO_PREFER_ORIGINAL=1
-    //   即可走平台官方原片（无损，不是抹像素）。
-    const videoId = extractVideoId(videoBytes);
-    if (accountType === "doubao" && videoId && fplayApis.size) {
-      const original = await resolveOriginalViaFplay(context, [...fplayApis]).catch(() => null);
-      if (original && process.env.DOUBAO_PREFER_ORIGINAL === "1") {
-        try {
-          const response = await context.request.get(original.url, { timeout: 120000 });
-          const body = await response.body();
-          if (response.ok() && body && body.length > 50_000) {
-            videoBytes = new Uint8Array(body);
-            resultUrl = original.url;
-            log(
-              `已按 DOUBAO_PREFER_ORIGINAL 换用官方原片：${original.definition}（${original.label}，` +
-                `${(body.length / 1048576).toFixed(1)} MB）`,
-            );
-          } else {
-            log(`原片下载不完整（HTTP ${response.status?.() ?? "?"}），沿用抓到的成片`);
-          }
-        } catch (error) {
-          log(`原片下载失败，沿用抓到的成片：${String(error).slice(0, 120)}`);
-        }
-      } else if (original) {
-        log(
-          `原片地址可用（${original.definition} ${original.label}），当前按原样保留成片；` +
-            `如需改用官方原片请设 DOUBAO_PREFER_ORIGINAL=1`,
-        );
-      }
-    }
-
     const outputDir = resolve(process.cwd(), "assets", "generated");
     await mkdir(outputDir, { recursive: true });
     const name = `doubao-${Date.now()}-${fileNameSafe(String(request.prompt || "").slice(0, 24) || "video")}.mp4`;
     const outputPath = resolve(outputDir, name);
     await writeFile(outputPath, videoBytes);
-    log(`成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）`);
+    // 成片来源（哪个地址抓到的）：排查"这版是哪条链路给的"时全靠这一行。
+    const sourceHost = (() => {
+      try {
+        return new URL(resultUrl).host;
+      } catch {
+        return resultUrl ? "未知" : "未记录";
+      }
+    })();
+    log(`成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）｜来源 ${sourceHost}`);
+
+    // ── 有条件的「去水印」───────────────────────────────────────────────
+    // 判据不是"认水印长什么样"，而是**拿平台原片当参照物做 A/B 差分**：
+    // 同一画面的两种编码差值是零散压缩噪声（外接框铺满画面、填充率≈0），
+    // 而水印只存在于其中一份里，会单独暴露成**一小块实心区域**。
+    // 判定动作也是安全的：判有水印 → 换成官方原片（无损，不是抹像素）；
+    // 判没有 → 原样保留、不做任何重编码（避免白白降质）。
+    // 详细依据与实测数字见 doubao-watermark.ts 顶部。
+    const videoId = extractVideoId(videoBytes);
+    if (accountType === "doubao" && videoId) {
+      if (!fplayApis.size) {
+        log(`未捕获到 fplay 地址，跳过水印判定（video_id=${videoId}）`);
+      } else {
+        const original = await resolveOriginalViaFplay(context, [...fplayApis]).catch(() => null);
+        if (!original) {
+          log(`未能解析出平台原片，跳过水印判定`);
+        } else {
+          const tempPath = resolve(outputDir, `.original-${Date.now()}.mp4`);
+          try {
+            const response = await context.request.get(original.url, { timeout: 120000 });
+            const body = await response.body();
+            if (!response.ok() || !body || body.length <= 50_000) {
+              log(`原片下载不完整（HTTP ${response.status?.() ?? "?"}），保持原样`);
+            } else {
+              await writeFile(tempPath, body);
+              const verdict = await compareForWatermark(outputPath, tempPath);
+              log(`水印判定：${verdict.reason}`);
+              if (verdict.watermarked) {
+                // 抓取版留一份存档：万一判错也能追回来，不销毁证据。
+                const archived = outputPath.replace(/\.mp4$/, ".抓取版.mp4");
+                await writeFile(archived, videoBytes);
+                await writeFile(outputPath, body);
+                videoBytes = new Uint8Array(body);
+                log(
+                  `已换用平台原片（${original.definition} ${original.label}，` +
+                    `${(body.length / 1048576).toFixed(1)} MB）｜区域 ${JSON.stringify(verdict.box)}｜抓取版存档 ${archived}`,
+                );
+              } else {
+                log("未检出差异区域，保留抓到的成片（不重编码）");
+              }
+            }
+          } catch (error) {
+            log(`原片比对失败，保持原样：${String(error).slice(0, 140)}`);
+          } finally {
+            await rm(tempPath, { force: true }).catch(() => undefined);
+          }
+        }
+      }
+    }
 
     return [
       {
