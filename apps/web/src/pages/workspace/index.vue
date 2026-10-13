@@ -24,6 +24,8 @@
         :saveNode="saveDocumentNode" />
     </keep-alive>
     <workspaceMenu class="workspaceMenu" @openSettings="settingsVisible = true" />
+    <!-- 账号状态浮窗：只在画布面板出现（文档面板下不需要，也会挡住内容）。 -->
+    <accountStatus v-if="activePanel === 'canvas'" />
     <el-segmented :modelValue="activePanel" class="panelSwitcher" :options="panelOptions" size="small" aria-label="切换面板" @change="switchPanel">
       <template #default="{ item }">
         <span class="panelOption">
@@ -62,6 +64,7 @@ import anonymousData from "@/lib/anonymousData";
 import canvasPanel from "./panels/canvas/canvasHost.vue";
 import type { DocumentNodeOptions } from "./panels/canvas/canvasFiles";
 import workspaceMenu from "./components/workspaceMenu.vue";
+import accountStatus from "./components/accountStatus.vue";
 import floatingAgent from "./components/floatingAgent.vue";
 
 const documentPanel = defineAsyncComponent(() => import("./panels/document/index.vue"));
