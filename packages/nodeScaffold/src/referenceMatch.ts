@@ -18,8 +18,10 @@
  *    - `声音/音色/配音…` 这类线索**只认 AUDIO 素材**，对不上宁可留空（如实回报），
  *      绝不用图片顶替 —— 音频的名字描述的是声音本身，图片/视频的名字描述的是画面，
  *      两者本就不该互相顶替。
- *    - `形象/本人/外观…` 这类线索只在**同类之间优选**，没有图片/视频素材时仍退回文字匹配，
- *      避免把画面素材误伤成「对不上」。
+ *    - `形象/本人/图片…`、`视频/片段…` 这类线索只在**同类之间优选**，没有对应类型的素材时
+ *      仍退回文字匹配，避免把画面素材误伤成「对不上」。
+ *    - 片段里**只有类型词**（「视频参考@」「音频参考@」）时，直接按类型认领对应素材，
+ *      不再要求名字里有同样的字 —— 上游视频节点叫「走路」也拉得到（每条素材仍只认领一次）。
  * 5. **先分配点明类型的那几个 `@`**：否则「大军及衣服鸭子图案参考@」这种没写类型词的片段
  *    会先把音频抢走，轮到「大军音色参考@」就只剩图片了（实测踩过）。
  * 6. **一对一**：一个素材最多被认领一次；同分时按连线顺序取靠前的（可预测，不随机）。
@@ -45,7 +47,7 @@ const fillerPattern = /[\s，。、；：,.;:!！?？“”"‘’()（）【】
  */
 const cueWords: Record<string, string[]> = {
   AUDIO: ["声音", "音色", "音频", "配音", "语音", "声线", "念白", "旁白", "说话", "歌声", "唱歌", "音乐"],
-  IMAGE: ["形象", "外观", "长相", "样子", "模样", "造型", "本人", "服装", "衣服", "穿着", "表情", "发型", "面孔", "脸"],
+  IMAGE: ["图片", "形象", "外观", "长相", "样子", "模样", "造型", "本人", "服装", "衣服", "穿着", "表情", "发型", "面孔", "脸"],
   VIDEO: ["视频", "片段", "运镜", "动作", "动效"],
   STRING: ["文本", "文案", "描述", "设定"],
 };
@@ -113,30 +115,35 @@ function normalize(text: string) {
 }
 
 function pickCandidate(segment: string, candidates: readonly Candidate[], used: ReadonlySet<number>) {
-  const qualified = candidates.filter((candidate) => !used.has(candidate.index) && hasTextEvidence(segment, candidate.name));
-  if (!qualified.length) return undefined;
+  const available = candidates.filter((candidate) => !used.has(candidate.index));
   const types = cueTypes(segment);
+  const ofType = available.filter((candidate) => dataTypes(candidate.dataType).some((type) => types.includes(type)));
+  // 片段里只有类型词（「视频参考@」「音频参考@」）⇒ 按类型直接认领，不看名字：
+  // 上游视频节点无论叫什么（哪怕是「走路」）都拉得到。
+  if (isTypeOnly(segment, types) && ofType.length) return best(segment, ofType);
+  const qualified = available.filter((candidate) => hasTextEvidence(segment, candidate.name));
   const strict = types.filter((type) => strictCueTypes.includes(type));
-  let pool = qualified;
   if (strict.length) {
     // 说了「音色/声音」就只认音频；对不上留空，让用户看到没匹配上，而不是拿图片顶替。
-    pool = pool.filter((candidate) => dataTypes(candidate.dataType).some((type) => strict.includes(type)));
-  } else {
-    const preferred = pool.filter((candidate) => dataTypes(candidate.dataType).some((type) => types.includes(type)));
-    if (preferred.length) pool = preferred;
+    return best(segment, qualified.filter((candidate) => dataTypes(candidate.dataType).some((type) => strict.includes(type))));
   }
-  if (!pool.length) return undefined;
-  let best = pool[0];
-  let bestRank = rank(segment, best);
+  const preferred = qualified.filter((candidate) => dataTypes(candidate.dataType).some((type) => types.includes(type)));
+  return best(segment, preferred.length ? preferred : qualified);
+}
+
+function best(segment: string, pool: readonly Candidate[]) {
+  let picked = pool[0];
+  if (!picked) return undefined;
+  let pickedRank = rank(segment, picked);
   for (const candidate of pool) {
     const candidateRank = rank(segment, candidate);
     // 严格大于：同分保留靠前的候选，于是结果只取决于连线顺序，可预测。
-    if (compareRank(candidateRank, bestRank) > 0) {
-      best = candidate;
-      bestRank = candidateRank;
+    if (compareRank(candidateRank, pickedRank) > 0) {
+      picked = candidate;
+      pickedRank = candidateRank;
     }
   }
-  return best;
+  return picked;
 }
 
 function hasTextEvidence(segment: string, name: string) {
@@ -188,6 +195,20 @@ function dataTypes(dataType: string | string[] | undefined) {
 
 function cueTypes(segment: string) {
   return Object.keys(cueWords).filter((type) => (cueWords[type] ?? []).some((word) => segment.includes(word)));
+}
+
+/** 类型词之外的虚词，出现与否不影响「这段只写了类型」的判断。 */
+const typeOnlyFillers = ["参考", "素材", "一张", "一个", "这段", "那个"];
+
+/** 片段里除了类型词与上面的虚词没有别的内容，例如「视频参考」「一张音频参考」。 */
+function isTypeOnly(segment: string, types: string[]) {
+  if (!types.length) return false;
+  let rest = segment;
+  for (const type of types) {
+    for (const word of cueWords[type] ?? []) rest = rest.split(word).join("");
+  }
+  for (const word of typeOnlyFillers) rest = rest.split(word).join("");
+  return rest.length === 0;
 }
 
 // 提示片段两侧的空白与标点不算描述文字，去掉后更好读。
