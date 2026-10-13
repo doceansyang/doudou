@@ -11,6 +11,7 @@
     :style="{ width: `${(previewUrl && imageWidth ? imageWidth : PREVIEW_WIDTH_16_9) + 18}px` }">
     <template v-if="editor?.mode" #top><div ref="paintToolbar" /></template>
     <template #topActions>
+      <el-button :icon="IconWand" :disabled="generating || deleting || uploading || editor?.mode === 'inpaint' || !refList.length || !data.prompt.trim()" text title="匹配元素" aria-label="匹配元素" @click.stop="matchElements">匹配元素</el-button>
       <el-button :icon="IconBrush" :disabled="generating || deleting || uploading || !previewUrl || gridSplit?.splitting" text title="局部重绘" aria-label="局部重绘" @click.stop="editor?.start('inpaint')">局部重绘</el-button>
       <el-button :icon="IconLayoutGrid" :disabled="generating || deleting || uploading || !previewUrl" :loading="gridSplit?.splitting" text title="宫格切分" aria-label="宫格切分" @click.stop="gridSplit?.open($event)">宫格切分</el-button>
       <mediaHistory mediaType="image" :current="outputFile" :disabled="generating || deleting || uploading" @select="outputs.image = { dataType: 'IMAGE', value: $event }" />
@@ -98,9 +99,9 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
-import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElImageViewer } from "element-plus";
-import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconLayoutGrid, IconBrush, IconPencil } from "@tabler/icons-vue";
-import { applyReferenceTags, groupNodeModels, nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElImageViewer, ElMessage } from "element-plus";
+import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconLayoutGrid, IconBrush, IconPencil, IconWand } from "@tabler/icons-vue";
+import { applyReferenceTags, groupNodeModels, matchReferenceMentions, nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
 import mediaHistory from "@toonflow/nodes-scaffold/mediaHistory";
@@ -234,6 +235,18 @@ function loadModels() {
     modelsRequest = undefined;
   });
   return modelsRequest;
+}
+
+function matchElements() {
+  const result = matchReferenceMentions(data.value.prompt, referenceMentions.value);
+  if (!result.matched) {
+    ElMessage.warning(result.unmatched.length ? `未匹配到上游素材：${result.unmatched.join("、")}` : "提示词里没有需要匹配的 @");
+    return;
+  }
+  data.value.prompt = result.text;
+  data.value.promptModel = result.text.split("\n").map((text) => [{ type: "Write", text }]);
+  if (result.unmatched.length) ElMessage.warning(`已匹配 ${result.matched} 个，未匹配：${result.unmatched.join("、")}`);
+  else ElMessage.success(`已匹配 ${result.matched} 个参考`);
 }
 
 async function startGeneration(inpaint = false) {

@@ -10,6 +10,7 @@ export * from "./nodeEvent";
 export * from "./nodeTools";
 export * from "./workspaceFiles";
 export * from "./previewSize";
+export * from "./referenceMatch";
 export * from "./referenceTags";
 
 export * from "./nodeAi";

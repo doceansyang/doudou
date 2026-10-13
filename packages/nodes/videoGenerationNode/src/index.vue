@@ -10,6 +10,7 @@
     :bottomWidth="660"
     :style="{ width: `${(previewUrl && videoWidth ? videoWidth : PREVIEW_WIDTH_16_9) + 18}px` }">
     <template #topActions>
+      <el-button :icon="IconWand" :disabled="generating || deleting || uploading || !refList.length || !data.prompt.trim()" text title="匹配元素" aria-label="匹配元素" @click.stop="matchElements">匹配元素</el-button>
       <el-button :icon="IconMusic" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('extractAudio')">提取音轨</el-button>
       <el-button :icon="IconLayersSubtract" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('separate')">分离音视频</el-button>
       <el-button :icon="IconScissors" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('trim')">截取片段</el-button>
@@ -100,9 +101,9 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
-import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElDropdown, ElDropdownMenu, ElDropdownItem } from "element-plus";
-import { IconCameraAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconMusic, IconLayersSubtract, IconScissors, IconPhotoScan, IconPlayerSkipBack, IconPlayerSkipForward } from "@tabler/icons-vue";
-import { applyReferenceTags, groupNodeModels, nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
+import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElDropdown, ElDropdownMenu, ElDropdownItem, ElMessage } from "element-plus";
+import { IconCameraAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconMusic, IconLayersSubtract, IconScissors, IconPhotoScan, IconPlayerSkipBack, IconPlayerSkipForward, IconWand } from "@tabler/icons-vue";
+import { applyReferenceTags, groupNodeModels, matchReferenceMentions, nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeVideoRequest, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import videoPlayer from "@toonflow/nodes-scaffold/videoPlayer";
 import videoActions from "@toonflow/node-video/videoActions";
@@ -268,6 +269,18 @@ function loadModels() {
     modelsRequest = undefined;
   });
   return modelsRequest;
+}
+
+function matchElements() {
+  const result = matchReferenceMentions(data.value.prompt, referenceMentions.value);
+  if (!result.matched) {
+    ElMessage.warning(result.unmatched.length ? `未匹配到上游素材：${result.unmatched.join("、")}` : "提示词里没有需要匹配的 @");
+    return;
+  }
+  data.value.prompt = result.text;
+  data.value.promptModel = result.text.split("\n").map((text) => [{ type: "Write", text }]);
+  if (result.unmatched.length) ElMessage.warning(`已匹配 ${result.matched} 个，未匹配：${result.unmatched.join("、")}`);
+  else ElMessage.success(`已匹配 ${result.matched} 个参考`);
 }
 
 async function startGeneration() {

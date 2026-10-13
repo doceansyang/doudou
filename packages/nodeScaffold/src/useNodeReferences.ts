@@ -6,7 +6,7 @@ import type { NodeInputValue } from "./values";
 
 export function useNodeReferences(handleId = "in") {
   const { id, node } = useNode<NodeData & { referenceOrder?: Record<string, string[]> }>();
-  const { removeEdges } = useVueFlow();
+  const { nodeLookup, removeEdges } = useVueFlow();
   const inputValues = ref<NodeInputValue[]>([]);
   const previews = ref(new Map<string, string>());
   const refList = computed({
@@ -21,11 +21,13 @@ export function useNodeReferences(handleId = "in") {
   const referenceMentions = computed(() => refList.value.flatMap((item, index) =>
     typeof item.dataType === "string" && ["IMAGE", "VIDEO", "AUDIO", "STRING"].includes(item.dataType)
       ? [{
-          id: referenceKey(item),
-          name: `参考 ${index + 1}`,
-          value: `{{ref ${index + 1}}}`,
-          avatar: previews.value.get(referenceKey(item)) || undefined,
-        }]
+        id: referenceKey(item),
+        // 名字取上游节点标题（用户会把图片/音频节点改名成「小花形象」这类素材名），
+        // 没改名时回退「参考 N」；`value` 的编号必须与 refList 下标一致，不能动。
+        name: sourceLabel(nodeLookup.value.get(item.source)) ?? `参考 ${index + 1}`,
+        value: `{{ref ${index + 1}}}`,
+        avatar: previews.value.get(referenceKey(item)) || undefined,
+      }]
       : []
   ));
 
@@ -52,4 +54,9 @@ export function useNodeReferences(handleId = "in") {
 
 function referenceKey(item: NodeInputValue) {
   return encodeURIComponent(JSON.stringify([item.source, item.sourceHandle]));
+}
+
+function sourceLabel(source: { data?: { label?: unknown }; label?: unknown } | undefined) {
+  const label = source?.data?.label ?? source?.label;
+  return typeof label === "string" && label.trim() ? label.trim() : undefined;
 }
