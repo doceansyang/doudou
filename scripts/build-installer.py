@@ -70,7 +70,16 @@ VERSION = read_version()
 OUT_SETUP = os.path.join(BASE, "JinyuTV-%s-Setup.exe" % VERSION)
 
 # 运行期真正需要的 RPA 文件（服务端会按 <安装目录>/scripts/doubao-rpa-service.ts 拉起）
-RPA_SCRIPTS = ["doubao-rpa-service.ts", "doubao-rpa-core.ts", "doubao-accounts.ts"]
+# RPA 运行必需的脚本。⚠️ 必须与 dev-update-both.py 的 RPA_SCRIPTS 保持一致：
+# 漏一个，发行版里 RPA 就会因为 import 失败而**整个起不来**（去水印那两个脚本踩过）。
+RPA_SCRIPTS = [
+    "doubao-rpa-service.ts",
+    "doubao-rpa-core.ts",
+    "doubao-accounts.ts",
+    "doubao-deshadow.ts",
+    "doubao-watermark.ts",
+    "deshadow-doubao.py",
+]
 
 # 授权运行时（**必须**打进安装包，否则客户装完无法激活，软件直接打不开）。
 # 只放运行时必需的两个；签发用的 make-license.py / sign.ts 绝不能打进去
@@ -190,6 +199,21 @@ def build_stage():
             raise SystemExit("!! 缺少授权运行时 %s，软件将无法激活，请先跑 dev-update.py 同步" % name)
     print("  scripts/      %d 个 RPA 文件 + %d 个授权运行时"
           % (len(RPA_SCRIPTS), len(os.listdir(dst_license))))
+
+    # 4) tools/：只带「豆包账号桥」浏览器扩展（客户要在自己的浏览器里加载它）。
+    #    ⚠️ 不带 tools/ 下的其他开发工具，尤其**绝不带 .pem 私钥** —— 那是扩展的签名身份，
+    #    泄露出去别人就能顶着同一个扩展 ID 发布东西。
+    ext_dir = os.path.join(SOFTWARE, "tools", "doubao-cookie-bridge")
+    if os.path.isdir(ext_dir):
+        n = copy_tree(ext_dir, os.path.join(stage, "tools", "doubao-cookie-bridge"))
+        print("  %-13s %d 个文件" % ("tools/ext", n))
+    else:
+        print("  %-13s !! 缺失（客户将无法一键同步浏览器账号）" % "tools/ext")
+    ext_crx = os.path.join(SOFTWARE, "tools", "doubao-cookie-bridge.crx")
+    if os.path.isfile(ext_crx):
+        os.makedirs(os.path.join(stage, "tools"), exist_ok=True)
+        shutil.copy2(ext_crx, os.path.join(stage, "tools", "doubao-cookie-bridge.crx"))
+        print("  %-13s 已复制" % "tools/crx")
 
     sanitize(stage)
     return stage

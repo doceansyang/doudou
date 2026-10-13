@@ -142,6 +142,27 @@ def sync_ext():
         print("--- 同步文件扩展 -> %s（build/ext + data/ext，%d 个文件）" % (root, len(names)))
 
 
+def sync_tools():
+    """把「豆包账号桥」浏览器扩展同步到两个实例。
+    客户要从**实例目录**里加载它，服务端 /extension 引导页展示的也是这个路径。"""
+    src_ext = os.path.join(PROJECT, "tools", "doubao-cookie-bridge")
+    src_crx = os.path.join(PROJECT, "tools", "doubao-cookie-bridge.crx")
+    if not os.path.isdir(src_ext):
+        print("--- 跳过浏览器扩展同步（tools/doubao-cookie-bridge 不存在）")
+        return
+    names = os.listdir(src_ext)
+    for root in TARGETS:
+        if not os.path.isdir(root):
+            continue
+        dst = os.path.join(root, "tools", "doubao-cookie-bridge")
+        os.makedirs(dst, exist_ok=True)
+        for name in names:
+            shutil.copy2(os.path.join(src_ext, name), os.path.join(dst, name))
+        if os.path.isfile(src_crx):
+            shutil.copy2(src_crx, os.path.join(root, "tools", "doubao-cookie-bridge.crx"))
+        print("--- 同步浏览器扩展 -> %s/tools（%d 个文件）" % (root, len(names)))
+
+
 def sync_rpa_scripts():
     """RPA（豆包浏览器自动化）跑的是**实例里 scripts/ 下的源码**（bun 直接跑 .ts），
     所以改了 RPA 相关文件必须同步过去，否则实例仍在跑旧代码（这个坑踩过一次：
@@ -237,5 +258,6 @@ if __name__ == "__main__":
     sync_provider_sources()
     sync_rpa_scripts()
     sync_ext()
+    sync_tools()
     restart_installed()
     check()

@@ -87,3 +87,6 @@ scripts/launcher.cs.bak-*
 # 本地构建与探针产物
 /_build-cache/
 /apps/scripts/_out/
+
+# 浏览器扩展的签名私钥（只在本机保留：泄露=别人可冒用同一扩展 ID）
+/tools/*.pem

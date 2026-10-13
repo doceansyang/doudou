@@ -20,13 +20,17 @@
  *
  * 接口（都绑在 127.0.0.1:18077）：
  *   GET    /                    账号管理页
+ *   GET    /extension           「豆包账号桥」扩展安装引导页（含 crx 下载）
  *   GET    /health              服务状态
  *   GET    /accounts            账号列表（含平台、今日已用/剩余额度）
  *   POST   /accounts            新增账号并扫码登录   body { name, accountType: "doubao" | "dola" }
+ *   POST   /accounts/import-cookies  用「豆包账号桥」扩展送来的 cookie 建账号（不扫码）
+ *        body { name, accountType, cookies: chrome.cookies.Cookie[] }
  *   POST   /accounts/:id/login  重新扫码登录
  *   DELETE /accounts/:id        删除账号
  *   POST   /generate            生成视频（自动选号，返回 base64）
  */
+import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
@@ -198,6 +202,53 @@ async function loginAccount(id: string): Promise<{ ok: boolean; error?: string }
   }
 }
 
+/**
+ * 用浏览器扩展送来的 cookie 建账号（不用扫码）。
+ *
+ * 数据来源是本机浏览器的「豆包账号桥」扩展（tools/doubao-cookie-bridge/）：
+ * 它读浏览器自己的 cookie store，能拿到 HttpOnly 的 sessionid —— 这是绕开
+ * Chromium App-Bound 加密的唯一零特权路径。
+ */
+async function importCookiesAccount(
+  cookies: unknown,
+  name?: string,
+  accountType: AccountType = "doubao",
+): Promise<{
+  ok: boolean;
+  error?: string;
+  id?: string;
+  name?: string;
+  accountType?: AccountType;
+  loggedIn?: boolean;
+  adopted?: number;
+}> {
+  if (running) return { ok: false, error: "生成任务执行中，同步只占用几秒，请稍后再试" };
+  running = true;
+  try {
+    const type = normalizeAccountType(accountType);
+    const core = await loadCore();
+    const result = await core.importCookies({ cookies, name, accountType: type });
+    await log(
+      `从浏览器同步账号「${result.account.name}」：写入 ${result.accepted} 条，` +
+        `登录态${result.loggedIn ? "有效" : "**未拿到 sessionid**"}`,
+    );
+    return {
+      ok: true,
+      id: result.account.id,
+      name: result.account.name,
+      accountType: type,
+      loggedIn: result.loggedIn,
+      adopted: result.accepted,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await log(`从浏览器同步账号失败：${message}`);
+    return { ok: false, error: message };
+  } finally {
+    running = false;
+  }
+}
+
 /* ------------------------------------------------------------------ 管理页 */
 
 const PAGE_STYLE = `
@@ -280,6 +331,45 @@ refresh();
 setInterval(refresh, 5000);
 `;
 
+/** 「豆包账号桥」扩展：随安装包分发（tools/ 下），用户从这里加载。 */
+const EXTENSION_DIR = resolve(process.cwd(), "tools", "doubao-cookie-bridge");
+const EXTENSION_CRX = resolve(process.cwd(), "tools", "doubao-cookie-bridge.crx");
+
+function renderExtensionPage(): string {
+  const ready = existsSync(EXTENSION_DIR);
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>豆包账号桥 · 安装引导</title><style>${PAGE_STYLE}</style></head>
+<body>
+<h1>豆包账号桥 —— 一键同步浏览器里已登录的豆包账号</h1>
+<div class="sub">装一次扩展，之后浏览器里登录了豆包，登录态会自动同步进来，不必再扫码。<b>数据只在本机 127.0.0.1 传输，不经任何服务器。</b></div>
+<div class="card"><h2>为什么必须用扩展</h2>
+<div>Chrome / Edge 从 127 版起把浏览器内的 cookie 用「App-Bound 加密」保护起来 —— <b>任何外部程序都读不到</b>（离线解密解不开，复制配置目录还会被判定路径不符而清空 cookie）。扩展运行在浏览器内部、读的是浏览器自己的 cookie 存储，是官方允许的唯一方式。</div></div>
+<div class="card"><h2>装到哪个浏览器？</h2>
+<div><b>哪个浏览器里登录了豆包，就装到哪个。</b>扩展读的是「它所在那个浏览器」的登录态 —— 装到 A 读不到 B 的，这是浏览器的隔离机制，没有例外。</div>
+<div class="tip" style="margin-top:8px">推荐 <b>Edge</b>（Windows 自带、兼容最好）。手机浏览器装不了扩展，手机上登录的账号同步不过来。</div>
+</div>
+<div class="card"><h2>安装（三步，只需一次）</h2>
+<ol>
+<li>在浏览器地址栏打开扩展管理页：<code>chrome://extensions</code>（Edge 是 <code>edge://extensions</code>）</li>
+<li>打开右上角 <b>开发者模式</b></li>
+<li>点 <b>加载已解压的扩展程序</b>，选中下面的目录</li>
+</ol>
+<div class="pathbox"><code id="extdir">${ready ? EXTENSION_DIR : "（未找到扩展目录 —— 本机可能没随安装包分发，请把 tools/doubao-cookie-bridge 拷到安装目录）"}</code><button id="copy">复制路径</button></div>
+<div class="tip"><b>其他浏览器</b>：360 / QQ / 搜狗同为 Chromium 内核，做法一样（地址栏同样输 <code>chrome://extensions</code>）；但新版对第三方扩展管得严，若「加载已解压」不可用，先去设置里关掉「扩展程序保护」。<b>夸克 PC 版</b>默认关闭了扩展能力，需要先在设置/实验室里开启「扩展支持」才看得到这个页面。</div>
+<div class="tip">也可以试试把 <a href="/extension/crx" download>扩展包（.crx）</a> 直接拖进扩展管理页 —— 部分浏览器版本允许，能省掉第 3 步。</div>
+</div>
+<div class="card"><h2>用起来</h2>
+<div>装好后在浏览器里打开并登录 <code>www.doubao.com</code>，扩展会自动把登录态同步过来；也可以回 <a href="/">账号管理</a> 页查看新增的账号。</div></div>
+<script>
+document.getElementById('copy').onclick = async () => {
+  const text = document.getElementById('extdir').textContent.trim();
+  try { await navigator.clipboard.writeText(text); document.getElementById('copy').textContent = '已复制 ✓'; }
+  catch { document.getElementById('copy').textContent = '请手动选中复制'; }
+};
+</script>
+</body></html>`;
+}
+
 function renderPage(): string {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>豆包账号管理 · Toonflow</title><style>${PAGE_STYLE}</style></head>
@@ -295,6 +385,11 @@ function renderPage(): string {
   <button class="primary" id="add">＋ 新增账号（打开扫码）</button>
   <button id="refresh">刷新</button>
   <span id="msg"></span>
+</div>
+<div class="tip" style="margin:10px 0 14px">
+  <b>想省掉扫码？</b>浏览器里已经登录了豆包的话，装一次
+  <a href="/extension" target="_blank">豆包账号桥扩展</a>，
+  之后登录态会自动同步进来。
 </div>
 <div id="list">加载中…</div>
 <script>${PAGE_SCRIPT}</script></body></html>`;
@@ -413,6 +508,27 @@ async function route(request: Request): Promise<Response> {
       return new Response(renderPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
+    // 扩展安装引导页 + 分发（随安装包放在 tools/ 下）
+    if (pathname === "/extension") {
+      return new Response(renderExtensionPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+    if (pathname === "/extension/path") {
+      return Response.json({
+        dir: EXTENSION_DIR,
+        crx: EXTENSION_CRX,
+        exists: existsSync(EXTENSION_DIR),
+        crxExists: existsSync(EXTENSION_CRX),
+      });
+    }
+    if (pathname === "/extension/crx" && existsSync(EXTENSION_CRX)) {
+      return new Response(new Uint8Array(await readFile(EXTENSION_CRX)), {
+        headers: {
+          "Content-Type": "application/x-chrome-extension",
+          "Content-Disposition": 'attachment; filename="doubao-cookie-bridge.crx"',
+        },
+      });
+    }
+
     if (pathname === "/health") {
       return Response.json({ ok: true, service: "doubao-rpa", busy: running, port: PORT });
     }
@@ -443,8 +559,15 @@ async function route(request: Request): Promise<Response> {
       return Response.json(await createAccount(body?.name, normalizeAccountType(body?.accountType)));
     }
 
-    const loginMatch = /^\/accounts\/([^/]+)\/login$/.exec(pathname);
-    if (loginMatch && request.method === "POST") {
+    // 浏览器扩展送来已登录的 cookie，直接建账号（不用扫码）。
+    if (pathname === "/accounts/import-cookies" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      return Response.json(
+        await importCookiesAccount(body?.cookies, body?.name, normalizeAccountType(body?.accountType)),
+      );
+    }
+
+    const loginMatch = /^\/accounts\/([^/]+)\/login$/.exec(pathname);    if (loginMatch && request.method === "POST") {
       return Response.json(await loginAccount(decodeURIComponent(loginMatch[1])));
     }
 
@@ -478,6 +601,7 @@ async function route(request: Request): Promise<Response> {
 
 await log(`豆包 RPA 服务已启动：http://${HOST}:${server.port}`);
 await log(`  账号管理页  http://${HOST}:${server.port}/`);
+await log(`  扩展安装引导 http://${HOST}:${server.port}/extension`);
 await log(`  账号列表    GET  /accounts`);
 await log(`  新增账号    POST /accounts`);
 await log(`  生成视频    POST /generate`);

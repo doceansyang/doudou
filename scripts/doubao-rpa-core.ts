@@ -4,9 +4,15 @@ import { appendFileSync, existsSync, mkdirSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { ACCOUNT_PLATFORMS, normalizeAccountType, type AccountType } from "./doubao-accounts.ts";
+import {
+  ACCOUNT_PLATFORMS,
+  addAccount,
+  markLoggedIn,
+  normalizeAccountType,
+  type AccountType,
+  type DoubaoAccount,
+} from "./doubao-accounts.ts";
 import { deshadowVideo } from "./doubao-deshadow.ts";
-import { compareForWatermark } from "./doubao-watermark.ts";
 
 /**
  * 豆包账号（免费额度）视频生成 —— Toonflow 供应商实现。
@@ -201,16 +207,17 @@ function chromeExecutable(): string | undefined {
  * profileDir 是账号隔离的关键：每个豆包账号一个独立 profile，
  * 登录态互不干扰，才能做到「多账号、额度用尽自动换号」。
  */
-async function launchContext(profileDir: string = PROFILE_ROOT) {
+async function launchContext(profileDir: string = PROFILE_ROOT, headless = false) {
   const { chromium } = await import("playwright");
   const executable = chromeExecutable();
   await mkdir(profileDir, { recursive: true });
   const options = {
     ...(executable ? { executablePath: executable } : {}),
-    headless: false,
+    headless,
     acceptDownloads: true,
     viewport: { width: 1440, height: 900 },
-    args: process.platform === "win32"
+    // 无头时不带窗口参数：位置/尺寸没意义，窗口标记也只会误导后续的窗口识别。
+    args: !headless && process.platform === "win32"
       ? ["--window-position=80,60", "--window-size=1440,900", RPA_WINDOW_MARK]
       : [],
   };
@@ -1306,6 +1313,119 @@ export async function openLogin(profileDir?: string, accountType?: string): Prom
       if (await isLoggedIn(context, type)) return;
     }
     throw new Error(`${label}登录超时，请重新发起登录`);
+  } finally {
+    await context.close().catch(() => undefined);
+  }
+}
+
+/* ------------------------------------------------- 从本机浏览器导入账号 */
+
+/**
+ * 浏览器扩展推来的 cookie 条目（见 tools/doubao-cookie-bridge/），
+ * 字段名沿用 `chrome.cookies.Cookie`。
+ */
+export type ImportedCookie = {
+  name?: unknown;
+  value?: unknown;
+  domain?: unknown;
+  path?: unknown;
+  secure?: unknown;
+  httpOnly?: unknown;
+  sameSite?: unknown;
+  expirationDate?: unknown;
+};
+
+/**
+ * 把扩展给的 cookie 映射成 Playwright 的格式。
+ *
+ * 三个必须处理的坑：
+ *  · Chrome 的 `sameSite` 是 `no_restriction | lax | strict | unspecified`，
+ *    Playwright 要 `None | Lax | Strict` —— 不映射会整批 addCookies 失败。
+ *  · `SameSite=None` 必须配 `Secure`，否则浏览器直接拒收；这种组合降级成 Lax，
+ *    宁可丢一个属性也别让这条 cookie 整条进不去。
+ *  · `__Host-` 前缀按规范要求 host-only + `path=/` + `Secure`，不能显式带 domain，
+ *    这类要改写成 `url` 形式。
+ */
+function toPlaywrightCookie(raw: ImportedCookie): Record<string, unknown> | null {
+  const name = String(raw.name ?? "").trim();
+  if (!name) return null;
+  const domain = String(raw.domain ?? "").trim();
+  const path = String(raw.path ?? "/").trim() || "/";
+  const secure = Boolean(raw.secure);
+  const cookie: Record<string, unknown> = {
+    name,
+    value: String(raw.value ?? ""),
+    path,
+    secure,
+    httpOnly: Boolean(raw.httpOnly),
+  };
+  if (domain && !name.startsWith("__Host-")) cookie.domain = domain;
+  else cookie.url = `https://${domain.replace(/^\./, "") || "www.doubao.com"}${path}`;
+
+  const sameSite = ({
+    // 扩展（chrome.cookies）给的是 no_restriction / lax / strict；
+    // 也可能是别人从 Playwright 读出来的 None / Lax / Strict —— 两种写法都要认。
+    no_restriction: "None",
+    none: "None",
+    lax: "Lax",
+    strict: "Strict",
+  } as Record<string, string>)[String(raw.sameSite ?? "").toLowerCase()];
+  if (sameSite) cookie.sameSite = sameSite === "None" && !secure ? "Lax" : sameSite;
+
+  const expires = Number(raw.expirationDate);
+  if (Number.isFinite(expires) && expires > 0) cookie.expires = Math.floor(expires);
+  return cookie;
+}
+
+/**
+ * 用「本机浏览器里已登录的豆包账号」直接建一个账号（不用扫码）。
+ *
+ * 为什么必须靠扩展送 cookie：cookie 库从 Chromium 127 起用 App-Bound 加密，
+ * 离线解不开、复制 profile 会被路径校验清空（见项目记忆），
+ * 而扩展读的是浏览器自己的 cookie store（含 HttpOnly 的 `sessionid`），不受这层限制。
+ */
+export async function importCookies(request: {
+  cookies?: ImportedCookie[];
+  name?: string;
+  accountType?: string;
+}): Promise<{ account: DoubaoAccount; loggedIn: boolean; accepted: number; dropped: number }> {
+  const type = normalizeAccountType(request.accountType);
+  const platform = ACCOUNT_PLATFORMS[type];
+  const incoming = Array.isArray(request.cookies) ? request.cookies : [];
+  // 空包就别建账号了 —— 否则账号池里会多出一个永远登录不上的空壳。
+  if (!incoming.length) throw new Error("没有收到任何 cookie（请确认已在浏览器里登录豆包）");
+
+  const account = await addAccount(request.name, type);
+  const context = await launchContext(account.profileDir, true);
+  try {
+    const mapped = incoming
+      .map(toPlaywrightCookie)
+      .filter((item): item is Record<string, unknown> => Boolean(item));
+
+    // 整体写最快；个别条目不被接受时退回逐条写 —— 别让一条坏 cookie 毁掉整次导入。
+    try {
+      if (mapped.length) await context.addCookies(mapped as any);
+    } catch {
+      for (const cookie of mapped) await context.addCookies([cookie] as any).catch(() => undefined);
+    }
+
+    const stored = await context.cookies([platform.url]);
+    const loggedIn = stored.some(
+      (cookie: any) =>
+        (cookie.name === "sessionid" || cookie.name === "sessionid_ss") &&
+        String(cookie.value ?? "").trim(),
+    );
+    await markLoggedIn(account.id, loggedIn);
+    log(
+      `从浏览器导入账号 ${account.id}：收到 ${incoming.length} 条、写入 ${mapped.length} 条，` +
+        `登录态${loggedIn ? "有效" : "**未见 sessionid**"}`,
+    );
+    return {
+      account: { ...account, hasLoggedIn: loggedIn },
+      loggedIn,
+      accepted: stored.length,
+      dropped: incoming.length - mapped.length,
+    };
   } finally {
     await context.close().catch(() => undefined);
   }
