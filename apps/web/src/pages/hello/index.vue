@@ -89,8 +89,22 @@
       :closeOnClickModal="!browserBusy"
       :closeOnPressEscape="!browserBusy"
       :showClose="!browserBusy">
+      <!-- 本机已经有可用账号：给一条"直接用"的近路，免得每次都被迫重新同步。 -->
+      <div v-if="usableAccounts.length" class="pickerExisting">
+        <div class="pickerExistingText">
+          <span class="pickerExistingTitle">{{ usableAccounts[0].name }}</span>
+          <span class="pickerExistingSub">
+            已登录 · 今日还能生成 {{ usableAccounts[0].remaining }} 个<template v-if="usableAccounts.length > 1">，另有 {{ usableAccounts.length - 1 }} 个可用账号</template>
+          </span>
+        </div>
+        <el-button class="pickerPrimaryButton" type="primary" round :disabled="browserBusy" @click="useExistingAccount">直接使用</el-button>
+      </div>
+
+      <p class="pickerSectionTitle">
+        {{ usableAccounts.length ? "或从浏览器同步已有账号" : "从浏览器同步你已登录的豆包账号" }}
+      </p>
       <p class="pickerHint">
-        将从你选的浏览器里读取<b>已登录的豆包账号</b>（只读，账号只保存在本机）。<br />
+        选一个浏览器，读它里面<b>已登录的豆包账号</b>（只读，账号只保存在本机）。<br />
         该浏览器<b>需要先完全退出</b>——它运行时登录数据被占用，读不到。
       </p>
 
@@ -119,7 +133,7 @@
       <template #footer>
         <el-button text :disabled="browserBusy" @click="useScanInstead">改用扫码登录</el-button>
         <el-button :disabled="browserBusy" @click="browserPickerVisible = false">取消</el-button>
-        <el-button type="primary" :loading="browserBusy" :disabled="!pickedBrowser || browsers.length === 0" @click="syncPickedBrowser">
+        <el-button class="pickerPrimaryButton" type="primary" :loading="browserBusy" :disabled="!pickedBrowser || browsers.length === 0" @click="syncPickedBrowser">
           开始同步
         </el-button>
       </template>
@@ -200,6 +214,10 @@ async function fetchRpaBusy(): Promise<boolean | null> {
 function pickUsable(accounts: LocalAccount[]): LocalAccount | undefined {
   return accounts.find(account => account.hasLoggedIn && account.remaining > 0);
 }
+/** 本机所有已就绪（已登录且有额度）的账号。 */
+function pickAllUsable(accounts: LocalAccount[]): LocalAccount[] {
+  return accounts.filter(account => account.hasLoggedIn && account.remaining > 0);
+}
 
 /* ------------------------------------------------ 选择「哪个浏览器」来同步 */
 
@@ -212,6 +230,8 @@ const browserBusy = ref(false);
 const browserError = ref("");
 const browsers = ref<BrowserItem[]>([]);
 const pickedBrowser = ref("");
+/** 本机已就绪的账号 —— 弹窗里「直接使用」那一条用的。 */
+const usableAccounts = ref<LocalAccount[]>([]);
 
 async function fetchBrowsers(): Promise<BrowserItem[]> {
   const response = await axios.get<{ browsers?: BrowserItem[] }>(`${RPA_URL}/browsers`, { timeout: 8000 });
@@ -238,10 +258,26 @@ async function loadBrowsers() {
   }
 }
 
-async function openBrowserPicker() {
+/**
+ * 打开「获取豆包账号」弹窗。
+ *
+ * `accounts` 传进来就沿用（调用方刚拉过），不传就自己拉一次 —— 保证弹窗里
+ * 「已有可用账号」这段信息和账号池是同步的。
+ */
+async function openBrowserPicker(accounts?: LocalAccount[]) {
   browserPickerVisible.value = true;
   pickedBrowser.value = "";
+  const list = accounts ?? (await fetchLocalAccounts().catch(() => [] as LocalAccount[]));
+  usableAccounts.value = pickAllUsable(list);
   await loadBrowsers();
+}
+
+/** 弹窗里的近路：本机已有可用账号，直接用，不必再同步。 */
+async function useExistingAccount() {
+  const ready = usableAccounts.value[0];
+  if (!ready) return;
+  browserPickerVisible.value = false;
+  await enterWorkspace(ready.name);
 }
 
 /** 同步完成（或扫码完成）后：重新拉一次账号池并进入创作。 */
@@ -300,15 +336,16 @@ async function enterWorkspace(accountName?: string) {
 }
 
 /**
- * 「一键获取本地账号」——**新老用户共用这一个按钮**：
- *   1) 本机账号池里有可用账号 → 直接用，进创作；
- *   2) 没有（新用户）→ **自动打开豆包登录窗口**（窗口会置顶），扫码一次即完成，
- *      登录成功后自动继续，用户不需要去别处装任何东西。
+ * 「一键获取本地账号」——**新老用户共用这一个按钮**，点了**一定弹出选择框**：
+ *   1) 扫到本机浏览器 → 弹「选择要同步的浏览器」，可以挑一个浏览器同步它里面
+ *      已登录的豆包账号；本机已有可用账号时，弹窗顶部另给一条「直接使用」的近路。
+ *   2) 一个浏览器都没扫到 → 有可用账号就直接进；否则打开我们自己的登录窗扫码。
  *
- * ⚠️ 为什么不能「直接读用户在别处登录的账号」：浏览器从 Chromium 127 起对 cookie 库
- * 启用 App-Bound 加密，外部程序离线解不开，绕过它要提权或注入浏览器（我们不做）。
- * 所以「一键」的准确含义是：**软件替你打开登录窗口 + 自动检测登录结果**；
- * 扫码一次后登录态长期留在本机，之后完全不用再登。
+ * ⚠️ 刻意**不做「有账号就静默进创作」**：那个"聪明"的短路会让用户以为
+ * 「点了一键还是没让我选」。宁可多点一下，也要让用户明确知道自己走的是哪条路。
+ *
+ * 关于"能不能读到用户别处浏览器的登录态"：见 `syncPickedBrowser` ——
+ * 走的是浏览器自带的 NetLog（浏览器内部解密），不需要装扩展。
  */
 async function useLocalAccount() {
   if (saving.value || scanning.value || browserPickerVisible.value) return;
@@ -321,18 +358,18 @@ async function useLocalAccount() {
       ElMessage.warning("没连上本机的豆包服务，请稍后重试；或先用「登录 Linke 自动配置」。");
       return;
     }
-    const ready = pickUsable(accounts);
-    if (ready) {
-      await enterWorkspace(ready.name);
-      return;
-    }
-
-    // 没有可用账号：先扫本机浏览器，让用户挑一个同步（命中就直接进）；
-    // 一个浏览器都没扫到才退回"我们自己的登录窗口扫码"。
+    // 主路径：先扫本机浏览器，让用户挑一个同步。
     const candidates = await fetchBrowsers().catch(() => [] as BrowserItem[]);
     if (candidates.length) {
       saving.value = false;
-      await openBrowserPicker();
+      await openBrowserPicker(accounts);
+      return;
+    }
+
+    // 一个浏览器都没扫到：有可用账号就用，没有就退回扫码登录窗。
+    const ready = pickUsable(accounts);
+    if (ready) {
+      await enterWorkspace(ready.name);
       return;
     }
 
@@ -849,6 +886,76 @@ onBeforeUnmount(() => {
 /* ---------- 「选择要同步的浏览器」弹窗 ----------
    ⚠️ 弹窗是 `appendToBody` 的，DOM 挂在 body 下，**不能**写成 `.hello .pickerItem`
    这类后代选择器（匹配不到）；scoped 属性在元素上仍然带着，所以平级写即可。 */
+.pickerExisting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--el-color-primary-light-7);
+  border-radius: var(--ui-radius-large, 12px);
+  background: var(--el-color-primary-light-9);
+
+  .pickerExistingText {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .pickerExistingTitle {
+    overflow: hidden;
+    color: var(--el-text-color-primary);
+    font-size: 14px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .pickerExistingSub {
+    color: var(--el-text-color-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+}
+
+/* 深色下主色近黑 ⇒ `--el-color-primary-light-9`(底) 与 `-light-7`(边) 都≈#141414，
+   比弹窗底还暗、边框与底同色。换成中性底 + 常规描边，块才立得起来。 */
+html.dark .pickerExisting {
+  border-color: var(--el-border-color);
+  background: var(--el-fill-color-light);
+}
+
+.pickerSectionTitle {
+  margin: 0 0 4px;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ⚠️ 本项目主色是**近黑**（#171717）：深色主题下 primary 按钮的底色也被算成近黑，
+   而弹窗底是 `--el-bg-color-overlay`(#1d1e1f) —— 实测「直接使用」是
+   bg=rgb(23,23,23) / 边框也是 rgb(23,23,23)，压在 rgb(29,30,31) 的弹窗上
+   **只有 6 个亮度差、连边框都同色**，截图里就是一段纯文字，完全看不出能点。
+   按项目既有做法换成「中性底 + 可读前景色」（见 assets/main.scss 的同因注释），
+   任何主色、任何主题下都清晰可辨。浅色主题下主色近黑本来就是深底白字，无需处理。 */
+html.dark .pickerPrimaryButton {
+  --el-button-bg-color: var(--el-fill-color);
+  --el-button-border-color: var(--el-border-color);
+  --el-button-text-color: var(--ui-brand-foreground, var(--el-text-color-primary));
+  --el-button-hover-bg-color: var(--el-fill-color-dark);
+  --el-button-hover-border-color: var(--el-border-color);
+  --el-button-hover-text-color: var(--ui-brand-foreground, var(--el-text-color-primary));
+  --el-button-active-bg-color: var(--el-fill-color-dark);
+  --el-button-active-border-color: var(--el-border-color);
+  --el-button-active-text-color: var(--ui-brand-foreground, var(--el-text-color-primary));
+  /* 禁用态也保留描边，别让「开始同步」在没选浏览器时整颗消失。 */
+  --el-button-disabled-bg-color: var(--el-fill-color-light);
+  --el-button-disabled-border-color: var(--el-border-color-lighter);
+  --el-button-disabled-text-color: var(--el-text-color-disabled);
+}
+
 .pickerHint {
   margin: 0 0 14px;
   color: var(--el-text-color-secondary);
