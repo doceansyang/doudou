@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { readFile } from "@toonflow/file";
+import { readFile, unlink } from "@toonflow/file";
 import type { Request, Response, NextFunction } from "express";
 import buildRoute from "@/core";
 import { error } from "@/lib/responseFormat";
@@ -17,6 +17,30 @@ import { z } from "zod";
 // APIMart / 秘塔版 MiniMax H3 已下线，不在清单里 —— 同时也要把它们从 data/providers 里删掉，
 // 因为 initializePlugins 只做「新增/覆盖」，**不会**清理已经铺进去的旧文件（标记位也拦不住）。
 const autoInstallProviders = ["JinyuDream.ts"];
+
+/**
+ * 已下线的内置供应商文件名 —— 启动时从 `<数据目录>/providers` 里主动清掉。
+ *
+ * 为什么必须主动清：`initializePlugins` 只新增/覆盖、**从不删除**，所以老装机（以及
+ * 任何装过旧版本的客户）会把早就下线的适配器一直带在身上 —— 表现就是模型下拉里还留着
+ * 「APIMart / 秘塔」这类根本用不了的条目，选中一生成就报错。
+ *
+ * 只删**确定的名字**，绝不按"白名单之外全删"处理 —— `data/providers` 里可能有
+ * 用户自己加的供应商，那是不能碰的。
+ *   apiMart  = APIMart（海外通道）
+ *   metaso   = 秘塔版 MiniMax H3
+ *   tfRouter = 早期 Linke 适配器（已由 JinyuDream 取代，留着会多出一个重复的 Linke 入口）
+ */
+const retiredProviders = ["apiMart.ts", "metaso.ts", "tfRouter.ts"];
+
+async function purgeRetiredProviders(directory: string): Promise<void> {
+  for (const name of retiredProviders) {
+    const target = resolve(directory, name);
+    await unlink(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") console.warn(`清理已下线供应商失败：${target}`, error);
+    });
+  }
+}
 
 export async function createApp({
   webRoot,
@@ -53,6 +77,9 @@ export async function createApp({
   }
   // ACT: 内置媒体供应商随构建同步，其他供应商文件和独立保存的配置保留。
   if (dataDirectory && providersRoot) {
+    const providersDirectory = resolve(dataDirectory, "providers");
+    // 先清掉已下线的（apiMart / metaso / tfRouter），否则老客户会一直带着它们。
+    await purgeRetiredProviders(providersDirectory);
     const sourceDirectory = resolve(providersRoot, "media");
     let providerRevision = pluginRevision;
     if (providerRevision === undefined) {
@@ -66,7 +93,7 @@ export async function createApp({
       }
       providerRevision = hash.digest("hex");
     }
-    await initializePlugins(resolve(dataDirectory, "providers"), sourceDirectory, autoInstallProviders, providerRevision);
+    await initializePlugins(providersDirectory, sourceDirectory, autoInstallProviders, providerRevision);
   }
   // ACT: 技能和团队只补首次安装，保留用户修改。
   if (dataDirectory && skillsRoot) await initializePlugins(resolve(dataDirectory, "skills"), skillsRoot);

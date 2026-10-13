@@ -117,6 +117,65 @@ def sync_provider_sources():
         print("--- 同步供应商适配器 -> %s（%d 个文件）" % (dst, n))
 
 
+# 已下线的内置供应商：必须**主动删**（同步只做"新增/覆盖"，从不删）。
+#   apiMart  = APIMart（海外通道，用户要求下线）
+#   metaso   = 秘塔版 MiniMax H3（用户要求下线）
+#   tfRouter = 早期 Linke 适配器（已由 JinyuDream 取代，留着会多出一个重复入口）
+RETIRED_PROVIDERS = ("apiMart.ts", "metaso.ts", "tfRouter.ts")
+# 手改 / 批量重命名留下的备份，不该跟着一起发出去。
+PROVIDER_JUNK = (".ts.orig", ".ts.bak", ".ts.before-", ".ts.pre-")
+
+
+def prune_provider_dir(directory):
+    """删掉目录里已下线的供应商与手改留下的备份文件。
+
+    ⚠️ 只删**确定的名字 / 固定的备份后缀**，绝不"白名单之外全删" ——
+    `data/providers` 里可能有用户自己加的供应商，那是不能碰的。"""
+    for name in os.listdir(directory):
+        path = os.path.join(directory, name)
+        if os.path.isdir(path):
+            prune_provider_dir(path)
+            continue
+        if name in RETIRED_PROVIDERS or any(tail in name for tail in PROVIDER_JUNK):
+            os.remove(path)
+            print("--- 清理已下线/备份的供应商文件：%s" % path)
+
+
+def sync_provider_build():
+    """把 `packages/providers/src` 原样重建到 `build/providers`，并同步到两个实例。
+
+    为什么必须"先清空、再复制"（与 `apps/server/scripts/build.ts` 一致）：
+    只增不删的话，**已下线的适配器会永远留在实例里**；而 `build-installer.py` 是从便携版
+    组包的，于是连安装包也一起带着它们发给客户。这个函数就是为了根治
+    「源码删了、实例与安装包里还有旧供应商」这个坑。"""
+    src = os.path.join(PROJECT, "packages", "providers", "src")
+    project_providers = os.path.join(PROJECT, "build", "providers")
+    if not os.path.isdir(src):
+        print("--- 跳过 build/providers 重建（packages/providers/src 不存在）")
+        return
+    shutil.rmtree(project_providers, ignore_errors=True)
+    shutil.copytree(src, project_providers)
+    prune_provider_dir(project_providers)
+    n = sum(len(files) for _, _, files in os.walk(project_providers))
+    print("--- 重建 build/providers（%d 个文件）" % n)
+    for root in TARGETS:
+        if not os.path.isdir(root):
+            continue
+        dst = os.path.join(root, "build", "providers")
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(project_providers, dst)
+        print("--- 同步 build/providers -> %s" % dst)
+
+
+def prune_all_providers():
+    """两个实例 + 本仓库：清掉已下线供应商与备份文件（build/ 与 data/ 两处）。"""
+    for root in TARGETS + [PROJECT]:
+        for rel in (os.path.join("build", "providers"), os.path.join("data", "providers")):
+            directory = os.path.join(root, rel)
+            if os.path.isdir(directory):
+                prune_provider_dir(directory)
+
+
 def sync_ext():
     """内置「文件扩展」（data/ext 下的 UMD 产物）是**运行时加载**的，改 packages/ext/**
     后必须重建并铺到**两个位置**：`<实例>/build/ext`（内置源，启动时 initializeExt 从
@@ -256,6 +315,8 @@ if __name__ == "__main__":
         sync_web()
     stop_ports()
     sync_provider_sources()
+    sync_provider_build()
+    prune_all_providers()
     sync_rpa_scripts()
     sync_ext()
     sync_tools()

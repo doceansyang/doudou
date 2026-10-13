@@ -292,6 +292,16 @@ function chromeExecutable(): string | undefined {
   return browserCache || undefined;
 }
 
+/**
+ * 当前生效的内核可执行文件。
+ *
+ * 服务端在「新建账号」成功后用它把内核**记到账号上** —— 之后这个号就一直用它，
+ * 哪怕全局选择后来变了（否则跨内核打开就丢登录态，用户又要重新扫码）。
+ */
+export function currentBrowser(): string {
+  return chromeExecutable() || "";
+}
+
 /* ------------------------------------------- 从「用户指定的浏览器」同步登录态 */
 
 const wait = (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -649,9 +659,12 @@ export async function captureBrowserSession(
  * profileDir 是账号隔离的关键：每个豆包账号一个独立 profile，
  * 登录态互不干扰，才能做到「多账号、额度用尽自动换号」。
  */
-async function launchContext(profileDir: string = PROFILE_ROOT, headless = false) {
+async function launchContext(profileDir: string = PROFILE_ROOT, headless = false, executableOverride?: string) {
   const { chromium } = await import("playwright");
-  const executable = chromeExecutable();
+  // 内核优先级：**账号自己记着的**（导入它时用的那个）→ 全局粘性选择。
+  // ⚠️ 必须按账号来：cookie 的加密密钥绑定具体浏览器，Chrome 建的 profile 换 Edge 打开
+  //    就读不出登录态。所以「从 Edge 同步来的号」必须一直用 Edge 打开，否则又要重新登录。
+  const executable = executableOverride && existsSync(executableOverride) ? executableOverride : chromeExecutable();
   await mkdir(profileDir, { recursive: true });
   const options = {
     ...(executable ? { executablePath: executable } : {}),
@@ -1780,13 +1793,20 @@ export async function openLogin(
      * ⚠️ 面向用户时必须是有头（扫码要看得见），这个开关只给自动化测试 / 无显示环境用。
      */
     headless?: boolean;
+    /**
+     * 用哪个浏览器内核开这个登录窗。
+     *
+     * 重登一个**已有账号**时要传它自己记着的内核 —— cookie 加密绑定浏览器，
+     * 用别的内核登录会把原来的登录态写废（两边都读不出来）。
+     */
+    browser?: string;
   },
 ): Promise<LoginCapture> {
   const type = normalizeAccountType(accountType);
   const platform = ACCOUNT_PLATFORMS[type];
   const home = platform.url;
   const label = platformLabel(type);
-  const context = await launchContext(profileDir || PROFILE_ROOT, Boolean(control?.headless));
+  const context = await launchContext(profileDir || PROFILE_ROOT, Boolean(control?.headless), control?.browser);
   try {
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(home, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -1882,6 +1902,17 @@ export type ImportedCookie = {
  *  · `__Host-` 前缀按规范要求 host-only + `path=/` + `Secure`，不能显式带 domain，
  *    这类要改写成 `url` 形式。
  */
+/**
+ * 导入 cookie 的**默认有效期**：180 天。
+ *
+ * 为什么必须有：`Cookie:` 请求头里不带 Expires，从 netlog / `multi_sids` 抠出来的 cookie
+ * 天然没有过期时间。而 Playwright 的 `addCookies` 若不给 `expires`，写进去的是**会话 cookie**
+ * —— context 一关就没了。于是「同步成功」只在这一刻成立：用户点生成时会重开 profile，
+ * 里面已经没有登录态，又弹登录窗要他重新扫码，一键同步等于白做。豆包 sessionid 服务端
+ * 约一年有效，这里给 180 天留足余量、又不至于把死 cookie 留太久。
+ */
+const COOKIE_TTL_SECONDS = 180 * 24 * 60 * 60;
+
 function toPlaywrightCookie(raw: ImportedCookie): Record<string, unknown> | null {
   const name = String(raw.name ?? "").trim();
   if (!name) return null;
@@ -1908,8 +1939,12 @@ function toPlaywrightCookie(raw: ImportedCookie): Record<string, unknown> | null
   } as Record<string, string>)[String(raw.sameSite ?? "").toLowerCase()];
   if (sameSite) cookie.sameSite = sameSite === "None" && !secure ? "Lax" : sameSite;
 
+  // ⚠️⚠️ 没给过期时间时**必须补一个默认值**，否则写进去的是会话 cookie（见 COOKIE_TTL_SECONDS）。
+  //   2026-10-13 对照实验实测：不带 expires → 重开 profile 里什么都没有；带上 → 登录态还在。
   const expires = Number(raw.expirationDate);
-  if (Number.isFinite(expires) && expires > 0) cookie.expires = Math.floor(expires);
+  cookie.expires = Number.isFinite(expires) && expires > 0
+    ? Math.floor(expires)
+    : Math.floor(Date.now() / 1000) + COOKIE_TTL_SECONDS;
   return cookie;
 }
 
@@ -2057,6 +2092,8 @@ async function importOneAccount(input: {
   uid?: string;
   sessionId?: string;
   cookies?: ImportedCookie[];
+  /** 「这份登录态是从哪个浏览器拿来的」—— 记到账号上，以后就用它启动（见 launchContext）。 */
+  browser?: string;
 }): Promise<ImportedAccountResult> {
   const type = input.accountType;
   const platform = ACCOUNT_PLATFORMS[type];
@@ -2089,7 +2126,7 @@ async function importOneAccount(input: {
   }
   const account = existing ?? (await addAccount(input.name, type));
 
-  const context = await launchContext(account.profileDir, true);
+  const context = await launchContext(account.profileDir, true, input.browser);
   try {
     const mapped = (incoming.length ? incoming : sessionCookies(sessionId, platform.domain))
       .map(toPlaywrightCookie)
@@ -2117,6 +2154,8 @@ async function importOneAccount(input: {
       fingerprint,
       name: finalName,
       hasLoggedIn: loggedIn,
+      // 记下建这个 profile 用的内核：生成时按它启动，别让账号跨内核打开（会读不出 cookie）。
+      browser: input.browser,
     });
     log(
       `从浏览器${existing ? "更新" : "导入"}账号「${finalName || account.name}」` +
@@ -2145,6 +2184,8 @@ export async function importCookies(request: {
   browserAccounts?: BrowserAccount[];
   /** `multi_sids` 原始值（仅日志 / 诊断用）。 */
   multiSidsRaw?: string;
+  /** 这份登录态是从哪个浏览器读来的（`GET /browsers` 的 executable）—— 建 profile 与后续生成都用它。 */
+  browser?: string;
 }): Promise<{ accounts: ImportedAccountResult[]; created: number; updated: number; raw: string }> {
   const type = normalizeAccountType(request.accountType);
   const incoming = Array.isArray(request.cookies) ? request.cookies : [];
@@ -2191,6 +2232,7 @@ export async function importCookies(request: {
           uid: item.uid,
           sessionId: item.sessionId,
           cookies: item.sessionId === currentSessionId ? incoming : undefined,
+          browser: request.browser,
         }),
       );
     }
@@ -2203,7 +2245,7 @@ export async function importCookies(request: {
   }
 
   // 兜底：没解析出清单时，按「当前这一份完整登录态」建号（老行为）。
-  const result = await importOneAccount({ accountType: type, name: request.name, cookies: incoming });
+  const result = await importOneAccount({ accountType: type, name: request.name, cookies: incoming, browser: request.browser });
   return { accounts: [result], created: result.created ? 1 : 0, updated: result.created ? 0 : 1, raw: "" };
 }
 
@@ -2220,7 +2262,10 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
   const home = homeUrlOf(accountType);
   const label = platformLabel(accountType);
   await mkdir(profileDir, { recursive: true });
-  const context = await launchContext(profileDir);
+  // 用**这个账号自己记着的内核**启动：从 Edge 同步来的号就用 Edge，别跨内核
+  // （cookie 加密绑定浏览器，跨内核读不出来 ⇒ 又会弹登录窗要用户重新扫码）。
+  const accountBrowser = String((request as any)?.browser || "");
+  const context = await launchContext(profileDir, false, accountBrowser || undefined);
 
   try {
     if (!(await isLoggedIn(context, accountType))) {

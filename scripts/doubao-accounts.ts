@@ -99,6 +99,14 @@ export type DoubaoAccount = {
    * 账号池里就会多出一个重复项。
    */
   doubaoUid: string;
+  /**
+   * 这个账号的 profile 是**哪个浏览器内核**建的（可执行文件全路径）。
+   *
+   * 为什么必须记住：Chromium 的 cookie 加密密钥绑定具体浏览器，Chrome 建的 profile
+   * 换 Edge 打开就读不出登录态。所以「从哪个浏览器同步来的号，就一直用那个浏览器」——
+   * 空串 = 还没记，按全局粘性选择走。
+   */
+  browser: string;
 };
 
 const ACCOUNTS_FILE = resolve(process.cwd(), "data", "doubao", "accounts.json");
@@ -140,6 +148,7 @@ function normalize(account: Partial<DoubaoAccount>, index: number): DoubaoAccoun
     note: String(account.note || ""),
     sessionFingerprint: String((account as { sessionFingerprint?: unknown }).sessionFingerprint || ""),
     doubaoUid: String((account as { doubaoUid?: unknown }).doubaoUid || ""),
+    browser: String((account as { browser?: unknown }).browser || ""),
   };
 }
 
@@ -318,13 +327,15 @@ export async function setSessionFingerprint(id: string, fingerprint: string): Pr
  */
 export async function setAccountIdentity(
   id: string,
-  identity: { uid?: string; fingerprint?: string; name?: string; hasLoggedIn?: boolean },
+  identity: { uid?: string; fingerprint?: string; name?: string; hasLoggedIn?: boolean; browser?: string },
 ): Promise<void> {
   const accounts = await loadAccounts();
   const account = accounts.find((a) => a.id === id);
   if (!account) return;
   if (identity.uid) account.doubaoUid = identity.uid;
   if (identity.fingerprint) account.sessionFingerprint = identity.fingerprint;
+  // 只在真的传了内核时覆盖 —— 别把已记住的内核抹成空串（那会让它退回全局选择）。
+  if (identity.browser) account.browser = identity.browser;
   // 昵称只在真的拿到时覆盖，别用空串把用户改过的名字冲掉
   if (identity.name && identity.name.trim()) account.name = identity.name.trim();
   if (identity.hasLoggedIn !== undefined) {

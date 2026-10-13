@@ -134,6 +134,9 @@ async function generate(payload: any): Promise<GenerateResult> {
           ratio: payload.ratio ? String(payload.ratio) : undefined,
           duration: payload.duration ? Number(payload.duration) : undefined,
           profileDir: account.profileDir,
+          // 用**这个账号自己记着的内核**生成（从 Edge 同步来的号就用 Edge）。
+          // 不传的话会退回全局选择，跨内核读不出 cookie ⇒ 又弹登录窗要用户重新扫码。
+          browser: account.browser,
           // 平台一路传到核心：由它决定打开哪个站点、用哪套页面控件
           accountType: account.accountType,
         });
@@ -189,7 +192,7 @@ let loginFinish = false;
  *
  * 可被 `/accounts/cancel-login` 打断，也可被 `/accounts/finish-login` 提前收工。
  */
-async function runLogin(profileDir: string, accountType: AccountType): Promise<any> {
+async function runLogin(profileDir: string, accountType: AccountType, browser?: string): Promise<any> {
   const controller = new AbortController();
   loginAbort = controller;
   loginFinish = false;
@@ -198,6 +201,8 @@ async function runLogin(profileDir: string, accountType: AccountType): Promise<a
     return await core.openLogin(profileDir, accountType, {
       signal: controller.signal,
       shouldFinish: () => loginFinish,
+      // 重登已有账号时用它自己记着的内核，别换（换内核会把原登录态写废）。
+      browser,
     });
   } finally {
     loginAbort = null;
@@ -240,18 +245,21 @@ async function createAccount(
 
     // 当前这个号 → 就用刚建的记录（登录态已经在它的 profile 里了）。
     const me = (captured.browserAccounts ?? []).find((item: any) => item.sessionId === captured.sessionId);
+    // 记下这次用的是哪个内核：以后生成/重登都按它来，客户不用再扫码。
+    const kernel = core.currentBrowser();
     await setAccountIdentity(account.id, {
       uid: captured.userId || me?.uid || "",
       fingerprint: captured.fingerprint,
       name: captured.nickname,
       hasLoggedIn: true,
+      browser: kernel,
     });
 
     // 窗口里还登了别的号 → 一并收进来（豆包多账号）。
     const extra = (captured.browserAccounts ?? []).filter((item: any) => item.sessionId !== captured.sessionId);
     let others: string[] = [];
     if (extra.length) {
-      const imported = await core.importCookies({ cookies: [], accountType: type, browserAccounts: extra });
+      const imported = await core.importCookies({ cookies: [], accountType: type, browserAccounts: extra, browser: kernel });
       others = (imported?.accounts ?? []).map((item: any) => item.name);
       await log(`登录窗口里还登录了 ${others.length} 个豆包账号：${others.join("、")} —— 已一并加入`);
     }
@@ -291,7 +299,7 @@ async function loginAccount(id: string): Promise<{ ok: boolean; error?: string }
     const accounts = await loadAccounts();
     const account = accounts.find((a) => a.id === id);
     if (!account) return { ok: false, error: "账号不存在" };
-    const captured = await runLogin(account.profileDir, account.accountType);
+    const captured = await runLogin(account.profileDir, account.accountType, account.browser);
     // 顺手把平台 uid / 昵称刷新一下（重新扫码可能是同一个号的另一份登录态）。
     await setAccountIdentity(account.id, {
       uid: captured?.userId || account.doubaoUid,
@@ -333,6 +341,9 @@ async function syncFromBrowser(id: string): Promise<{
       cookies: captured.cookies,
       browserAccounts: captured.browserAccounts,
       accountType: "doubao",
+      // ★ 用「被同步的那个浏览器」建这些号的 profile，并记到账号上：
+      //   以后点生成就用它启动，客户不用再登一次。
+      browser: candidate.executable,
     });
     const list = result.accounts ?? [];
     await log(

@@ -10,7 +10,6 @@
     ".": "./index.ts",
     "./types": "./types.d.ts",
     "./language/JinyuDream": "./src/language/JinyuDream.ts",
-    "./language/deepSeek": "./src/language/deepSeek.ts",
     "./media/JinyuDream": "./src/media/JinyuDream.ts"
   }
 }
