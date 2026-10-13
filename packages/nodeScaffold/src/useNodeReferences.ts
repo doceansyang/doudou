@@ -26,6 +26,8 @@ export function useNodeReferences(handleId = "in") {
         // 没改名时回退「参考 N」；`value` 的编号必须与 refList 下标一致，不能动。
         name: sourceLabel(nodeLookup.value.get(item.source)) ?? `参考 ${index + 1}`,
         value: `{{ref ${index + 1}}}`,
+        // 类型供「匹配元素」按线索优选（如「小花声音参考@」优先选音频素材）。
+        dataType: item.dataType,
         avatar: previews.value.get(referenceKey(item)) || undefined,
       }]
       : []
