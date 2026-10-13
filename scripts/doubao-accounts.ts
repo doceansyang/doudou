@@ -83,6 +83,14 @@ export type DoubaoAccount = {
   sortOrder: number;
   lastUsedAt: string;
   note: string;
+  /**
+   * 登录态指纹（`sessionid` + `sid_tt` 的 hash）。
+   *
+   * 为什么需要：浏览器扩展会**反复推送**同一份登录态（豆包 cookie 一变就推一次，
+   * 另有每 5 分钟兜底），若每次都 `addAccount` 就会把账号池撑爆。
+   * 靠它认出「这还是同一个账号」，改成更新而不是新建。
+   */
+  sessionFingerprint: string;
 };
 
 const ACCOUNTS_FILE = resolve(process.cwd(), "data", "doubao", "accounts.json");
@@ -122,6 +130,7 @@ function normalize(account: Partial<DoubaoAccount>, index: number): DoubaoAccoun
     sortOrder: Number(account.sortOrder ?? index),
     lastUsedAt: String(account.lastUsedAt || ""),
     note: String(account.note || ""),
+    sessionFingerprint: String((account as { sessionFingerprint?: unknown }).sessionFingerprint || ""),
   };
 }
 
@@ -281,6 +290,15 @@ export async function markLoggedIn(id: string, loggedIn: boolean): Promise<void>
   if (!account) return;
   account.hasLoggedIn = loggedIn;
   account.quotaExhaustedOn = ""; // 重新登录视为恢复可用
+  await saveAccounts(accounts);
+}
+
+/** 记下该账号对应的登录态指纹（供「同一浏览器反复推送」时去重）。 */
+export async function setSessionFingerprint(id: string, fingerprint: string): Promise<void> {
+  const accounts = await loadAccounts();
+  const account = accounts.find((a) => a.id === id);
+  if (!account) return;
+  account.sessionFingerprint = fingerprint;
   await saveAccounts(accounts);
 }
 

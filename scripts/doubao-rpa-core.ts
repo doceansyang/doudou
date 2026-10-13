@@ -7,8 +7,10 @@ import { dirname, join, resolve } from "node:path";
 import {
   ACCOUNT_PLATFORMS,
   addAccount,
+  loadAccounts,
   markLoggedIn,
   normalizeAccountType,
+  setSessionFingerprint,
   type AccountType,
   type DoubaoAccount,
 } from "./doubao-accounts.ts";
@@ -1384,18 +1386,34 @@ function toPlaywrightCookie(raw: ImportedCookie): Record<string, unknown> | null
  * 离线解不开、复制 profile 会被路径校验清空（见项目记忆），
  * 而扩展读的是浏览器自己的 cookie store（含 HttpOnly 的 `sessionid`），不受这层限制。
  */
+/**
+ * 登录态指纹：用 `sessionid` + `sid_tt` 算 hash。
+ * 同一个浏览器反复推的是同一份登录态，靠它认出来（去重用）。
+ */
+function loginFingerprint(cookies: ImportedCookie[]): string {
+  const read = (name: string) => String(cookies.find((item) => String(item.name) === name)?.value ?? "").trim();
+  if (!read("sessionid")) return "";
+  return createHash("sha256").update(`${read("sessionid")}|${read("sid_tt")}`).digest("hex").slice(0, 32);
+}
+
 export async function importCookies(request: {
   cookies?: ImportedCookie[];
   name?: string;
   accountType?: string;
-}): Promise<{ account: DoubaoAccount; loggedIn: boolean; accepted: number; dropped: number }> {
+}): Promise<{ account: DoubaoAccount; loggedIn: boolean; accepted: number; dropped: number; created: boolean }> {
   const type = normalizeAccountType(request.accountType);
   const platform = ACCOUNT_PLATFORMS[type];
   const incoming = Array.isArray(request.cookies) ? request.cookies : [];
   // 空包就别建账号了 —— 否则账号池里会多出一个永远登录不上的空壳。
   if (!incoming.length) throw new Error("没有收到任何 cookie（请确认已在浏览器里登录豆包）");
 
-  const account = await addAccount(request.name, type);
+  // ⚠️ 必须去重：扩展在 cookie 变动时推一次、另有每 5 分钟兜底推一次。
+  // 原实现每次都 addAccount，同一份登录态会把账号池一遍遍撑大。
+  const fingerprint = loginFingerprint(incoming);
+  const existing = fingerprint
+    ? (await loadAccounts()).find((item) => item.accountType === type && item.sessionFingerprint === fingerprint)
+    : undefined;
+  const account = existing ?? (await addAccount(request.name, type));
   const context = await launchContext(account.profileDir, true);
   try {
     const mapped = incoming
@@ -1416,15 +1434,17 @@ export async function importCookies(request: {
         String(cookie.value ?? "").trim(),
     );
     await markLoggedIn(account.id, loggedIn);
+    if (fingerprint) await setSessionFingerprint(account.id, fingerprint);
     log(
-      `从浏览器导入账号 ${account.id}：收到 ${incoming.length} 条、写入 ${mapped.length} 条，` +
+      `从浏览器${existing ? "更新" : "导入"}账号 ${account.id}：收到 ${incoming.length} 条、写入 ${mapped.length} 条，` +
         `登录态${loggedIn ? "有效" : "**未见 sessionid**"}`,
     );
     return {
-      account: { ...account, hasLoggedIn: loggedIn },
+      account: { ...account, hasLoggedIn: loggedIn, sessionFingerprint: fingerprint || account.sessionFingerprint },
       loggedIn,
       accepted: stored.length,
       dropped: incoming.length - mapped.length,
+      created: !existing,
     };
   } finally {
     await context.close().catch(() => undefined);

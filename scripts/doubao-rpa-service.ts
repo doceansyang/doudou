@@ -221,6 +221,8 @@ async function importCookiesAccount(
   accountType?: AccountType;
   loggedIn?: boolean;
   adopted?: number;
+  /** true = 新建了账号；false = 这份登录态之前就在（更新了它，没多建）。 */
+  created?: boolean;
 }> {
   if (running) return { ok: false, error: "生成任务执行中，同步只占用几秒，请稍后再试" };
   running = true;
@@ -229,7 +231,7 @@ async function importCookiesAccount(
     const core = await loadCore();
     const result = await core.importCookies({ cookies, name, accountType: type });
     await log(
-      `从浏览器同步账号「${result.account.name}」：写入 ${result.accepted} 条，` +
+      `从浏览器${result.created ? "新增" : "更新"}账号「${result.account.name}」：写入 ${result.accepted} 条，` +
         `登录态${result.loggedIn ? "有效" : "**未拿到 sessionid**"}`,
     );
     return {
@@ -239,6 +241,7 @@ async function importCookiesAccount(
       accountType: type,
       loggedIn: result.loggedIn,
       adopted: result.accepted,
+      created: result.created,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
