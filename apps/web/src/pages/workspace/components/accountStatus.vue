@@ -221,9 +221,17 @@ onBeforeUnmount(stopPolling);
   top: 50%;
   left: 15px;
   z-index: 5;
-  width: 44px;
-  height: 44px;
-  padding: 0;
+  /* ⚠️ 这几条必须 `!important`：Element Plus 的 `.el-button.is-circle` 特异性高于本组件的
+     作用域选择器，会把 width / padding 顶掉 —— 实测（2026-10-13）：算了 44×44，
+     实际渲染成 **宽 32（EP 赢）× 高 44（我赢）**，配上 `border-radius: 50%` 就是个**椭圆**。
+     min-* 与 aspect-ratio 一起钉住，避免以后加 padding/border 又把它撑变形。 */
+  width: 44px !important;
+  height: 44px !important;
+  min-width: 44px !important;
+  min-height: 44px !important;
+  padding: 0 !important;
+  aspect-ratio: 1 / 1;
+  box-sizing: border-box;
   border: 1px solid var(--el-border-color-light);
   border-radius: 50%;
   color: var(--el-text-color-regular);
