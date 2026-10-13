@@ -1,8 +1,9 @@
 import type { GenerateMedia, MediaAsset, VideoRequest } from "@toonflow/providers";
+import { spawn, spawnSync } from "node:child_process";
 import { createDecipheriv, createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   ACCOUNT_PLATFORMS,
@@ -289,6 +290,269 @@ function chromeExecutable(): string | undefined {
   if (browserCache) log(`浏览器内核：${browserCache}`);
   else log("没找到可用的 Chromium 内核浏览器（Chrome / Edge），登录与生成都会失败");
   return browserCache || undefined;
+}
+
+/* ------------------------------------------- 从「用户指定的浏览器」同步登录态 */
+
+const wait = (ms: number) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+
+/** 本机装着的 Chromium 内核浏览器 + 它的用户数据目录。 */
+export type BrowserCandidate = {
+  id: string;
+  name: string;
+  executable: string;
+  /** 传给 `--user-data-dir` 的目录（登录数据在里面）。 */
+  userDataDir: string;
+  /** profile 子目录名（通常 Default）。 */
+  profileDirectory: string;
+  /**
+   * 这个浏览器的 **profile 是否被占用**（占用 = 同步不了，要请用户先退出它）。
+   *
+   * ⚠️ 判据是「cookie 库能不能打开」而**不是**「进程名在不在跑」——
+   * 后者会把任何叫 chrome.exe 的东西算进来（Playwright 自带的 Chromium、
+   * 别家的 Chromium 套壳都叫这个名），实测误报过：Chrome 明明没开却被标成"正在运行"。
+   */
+  running: boolean;
+  /**
+   * 这个浏览器的 cookie 库里有没有 doubao 的记录。
+   *
+   * ⚠️ 只查 `host_key` 这种**明文**列（grep 原始文件字节），**绝不解密任何 cookie 值** ——
+   * 目的是让界面能提前标出"哪个浏览器里登录过豆包"，而不是偷看内容。
+   * `null` = 读不到（profile 被占用）—— 别把"读不到"谎报成"没有"。
+   */
+  hasDoubao: boolean | null;
+};
+
+/** 已知的 Chromium 内核浏览器（Firefox 扩展机制不同，暂不支持）。 */
+function browserRecipe(): Array<{ id: string; name: string; exe: string[]; userData: string[]; proc: string }> {
+  const local = process.env.LOCALAPPDATA ?? "";
+  const pf = process.env.ProgramFiles ?? "C:\\Program Files";
+  const pfx = process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
+  if (process.platform !== "win32") {
+    return [
+      { id: "chrome", name: "Google Chrome", exe: ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"], userData: [join(homedir(), "Library/Application Support/Google/Chrome")], proc: "Google Chrome" },
+      { id: "edge", name: "Microsoft Edge", exe: ["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"], userData: [join(homedir(), "Library/Application Support/Microsoft Edge")], proc: "Microsoft Edge" },
+    ];
+  }
+  return [
+    {
+      id: "chrome",
+      name: "Google Chrome",
+      exe: [join(pf, "Google\\Chrome\\Application\\chrome.exe"), join(pfx, "Google\\Chrome\\Application\\chrome.exe"), local && join(local, "Google\\Chrome\\Application\\chrome.exe")],
+      userData: [local && join(local, "Google\\Chrome\\User Data")],
+      proc: "chrome.exe",
+    },
+    {
+      id: "edge",
+      name: "Microsoft Edge",
+      exe: [join(pfx, "Microsoft\\Edge\\Application\\msedge.exe"), join(pf, "Microsoft\\Edge\\Application\\msedge.exe")],
+      userData: [local && join(local, "Microsoft\\Edge\\User Data")],
+      proc: "msedge.exe",
+    },
+    {
+      id: "360",
+      name: "360 安全浏览器",
+      exe: [join(pfx, "360Chrome\\Chrome\\Application\\360chrome.exe"), join(pf, "360Chrome\\Chrome\\Application\\360chrome.exe"), local && join(local, "360Chrome\\Chrome\\Application\\360chrome.exe")],
+      userData: [local && join(local, "360Chrome\\Chrome\\User Data")],
+      proc: "360chrome.exe",
+    },
+    {
+      id: "quark",
+      name: "夸克浏览器",
+      exe: [local && join(local, "Quark\\Application\\QuarkPC.exe"), join(pf, "Quark\\Application\\QuarkPC.exe"), local && join(local, "Programs\\Quark\\QuarkPC.exe")],
+      userData: [local && join(local, "Quark\\User Data")],
+      proc: "QuarkPC.exe",
+    },
+    {
+      id: "qq",
+      name: "QQ 浏览器",
+      exe: [join(pf, "Tencent\\QQBrowser\\QQBrowser.exe"), join(pfx, "Tencent\\QQBrowser\\QQBrowser.exe"), local && join(local, "Tencent\\QQBrowser\\QQBrowser.exe")],
+      userData: [local && join(local, "Tencent\\QQBrowser\\User Data")],
+      proc: "QQBrowser.exe",
+    },
+    {
+      id: "brave",
+      name: "Brave",
+      exe: [join(pf, "BraveSoftware\\Brave-Browser\\Application\\brave.exe"), local && join(local, "BraveSoftware\\Brave-Browser\\Application\\brave.exe")],
+      userData: [local && join(local, "BraveSoftware\\Brave-Browser\\User Data")],
+      proc: "brave.exe",
+    },
+  ];
+}
+
+/**
+ * profile 是否被占用 —— 看 cookie 库能不能打开。
+ *
+ * 浏览器跑着的时候这个文件是打不开的（实测 Edge 在跑时读它直接抛错），
+ * 所以它比"进程名"准得多，也正好等于"现在能不能同步"。
+ */
+function isProfileLocked(profileDir: string): boolean {
+  for (const rel of ["Network\\Cookies", "Cookies"]) {
+    const file = join(profileDir, rel);
+    if (!existsSync(file)) continue;
+    try {
+      readFileSync(file);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * cookie 库里有没有 doubao 记录 —— 只搜**明文**字节，不碰加密的值。
+ *
+ * 为什么不解密：cookie 库从 Chromium 127 起是 App-Bound 加密，离线解不开；
+ * 但 `host_key`（域名）这一列是明文存的，够用来回答"这个浏览器登录过豆包吗"。
+ */
+function cookiesMentionDoubao(profileDir: string): boolean | null {
+  for (const rel of ["Network\\Cookies", "Cookies"]) {
+    const file = join(profileDir, rel);
+    if (!existsSync(file)) continue;
+    try {
+      if (readFileSync(file).includes("doubao")) return true;
+    } catch {
+      // 被占用 ⇒ 未知。绝不能报成"没有豆包"。
+      return null;
+    }
+  }
+  return false;
+}
+
+/** 扫描本机装着的 Chromium 浏览器（给引导页的"选浏览器"用）。 */
+export function listBrowserCandidates(): BrowserCandidate[] {
+  const out: BrowserCandidate[] = [];
+  for (const item of browserRecipe()) {
+    const executable = item.exe.find((path): path is string => Boolean(path) && existsSync(path));
+    if (!executable) continue;
+    const userDataDir = item.userData.find((path): path is string => Boolean(path) && existsSync(path));
+    if (!userDataDir) continue;
+    // 多用户配置：优先 Default，否则取第一个 Profile *
+    let profileDirectory = "Default";
+    if (!existsSync(join(userDataDir, profileDirectory))) {
+      const sibling = readdirSync(userDataDir).find((name) => /^Profile \d+$/.test(name));
+      if (sibling) profileDirectory = sibling;
+    }
+    const profileDir = join(userDataDir, profileDirectory);
+    const running = isProfileLocked(profileDir);
+    out.push({
+      id: item.id,
+      name: item.name,
+      executable,
+      userDataDir,
+      profileDirectory,
+      running,
+      hasDoubao: running ? null : cookiesMentionDoubao(profileDir),
+    });
+  }
+  return out;
+}
+
+/**
+ * 从 netlog 文本里取出豆包那条 `Cookie` 请求头，拆成 cookie 数组。
+ *
+ * 为什么用 netlog：Chromium 137+ **明确禁止**对默认 profile 开远程调试
+ * （`DevTools remote debugging requires a non-default data directory`），
+ * 而 `--log-net-log` 是普通诊断开关、不受该限制；配合
+ * `--net-log-capture-mode=IncludeSensitive` 能把请求头（含 Cookie）原样写进日志。
+ * 这是「不动用户任何东西就把已登录账号读出来」在 Chrome/Edge 上唯一可行的合法路径。
+ */
+function parseCookiesFromNetLog(text: string): ImportedCookie[] {
+  const matches = [...text.matchAll(/Cookie: ([^"]*?sessionid=[^"]*)/g)];
+  if (!matches.length) return [];
+  // 同一份 cookie 会在多个请求里出现；取最长的那条（最全）。
+  const raw = matches.map((match) => match[1]).sort((a, b) => b.length - a.length)[0];
+  const cookies: ImportedCookie[] = [];
+  for (const part of raw.split(";")) {
+    const index = part.indexOf("=");
+    if (index <= 0) continue;
+    const name = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (!/^[A-Za-z0-9_.\-]+$/.test(name) || !value) continue;
+    cookies.push({ name, value, domain: ".doubao.com", path: "/", secure: true, httpOnly: true, sameSite: "no_restriction" });
+  }
+  return cookies;
+}
+
+/**
+ * 从「用户指定的浏览器」同步已登录的豆包账号。
+ *
+ * 做法：用它的**真实用户数据目录**无头启动一次，带上 netlog 开关并打开豆包首页；
+ * 浏览器自己此刻发出的请求就带着 cookie（浏览器内部解密，绕开 App-Bound），
+ * 我们从日志里把 doubao 的 Cookie 头取出来 —— 顺带把 `multi_sids` 里的
+ * **全部账号**一起拿到，走与扩展/登录窗完全相同的落库路径。
+ *
+ * 约束与代价：
+ *   · 浏览器**必须在退出状态**（运行中会占用登录数据，我们启动的新实例会把手交回旧进程、
+ *     什么也读不到）；
+ *   · 无头运行，用户看不到窗口；会读写该 profile 的常规文件（和用户自己开一次浏览器同理）；
+ *   · netlog 只用于解析豆包 cookie，**解析完立刻删除**，不上传任何地方。
+ */
+export async function captureBrowserSession(
+  candidate: BrowserCandidate,
+): Promise<{ cookies: ImportedCookie[]; browserAccounts: BrowserAccount[]; sessionId: string }> {
+  if (candidate.running) {
+    throw new Error(`${candidate.name} 正在运行，它占用着登录数据。请先完全退出它，再点一次同步。`);
+  }
+  const netlog = join(tmpdir(), `jinyutv-netlog-${process.pid}-${Date.now()}.json`);
+  await rm(netlog, { force: true }).catch(() => undefined);
+
+  log(`从 ${candidate.name} 读取登录态（无头启动一次，只读 cookie，读完即删日志）…`);
+  const child = spawn(
+    candidate.executable,
+    [
+      `--user-data-dir=${candidate.userDataDir}`,
+      `--profile-directory=${candidate.profileDirectory}`,
+      `--log-net-log=${netlog}`,
+      "--net-log-capture-mode=IncludeSensitive",
+      "--headless=new",
+      "--no-first-run",
+      "--no-default-browser-check",
+      homeUrlOf("doubao"),
+    ],
+    { stdio: "ignore", windowsHide: true },
+  );
+
+  try {
+    // 轮询日志：一出现带 sessionid 的 Cookie 头就收工（通常 3～8 秒）。
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      await wait(1200);
+      try {
+        if (/Cookie: [^"]*sessionid=/.test(readFileSync(netlog, "utf-8"))) break;
+      } catch {
+        // 日志还没落盘，继续等
+      }
+    }
+  } finally {
+    try {
+      if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+      else child.kill("SIGKILL");
+    } catch {
+      // 进程可能已自行退出
+    }
+  }
+
+  let text = "";
+  try {
+    text = readFileSync(netlog, "utf-8");
+  } catch {
+    throw new Error(`没能从 ${candidate.name} 读到网络日志：请确认它已经**完全退出**（运行中的浏览器会占用登录数据，我们启动的实例会把手交回它、什么也读不到）。`);
+  } finally {
+    // ⚠️ 立刻删除：日志里有 cookie，绝不留在磁盘上。
+    await rm(netlog, { force: true }).catch(() => undefined);
+  }
+
+  const cookies = parseCookiesFromNetLog(text);
+  const sessionId = String(cookies.find((item) => item.name === "sessionid")?.value ?? "").trim();
+  if (!sessionId) {
+    throw new Error(`${candidate.name} 里没有登录豆包（没读到登录态）。请在该浏览器里登录一次，或改用「用登录窗口扫码」。`);
+  }
+  const browserAccounts = parseBrowserAccounts(String(cookies.find((item) => item.name === "multi_sids")?.value ?? ""));
+  if (!browserAccounts.length) browserAccounts.push({ sessionId });
+  log(`从 ${candidate.name} 读到 ${cookies.length} 条 cookie，其中登记了 ${browserAccounts.length} 个豆包账号`);
+  return { cookies, browserAccounts, sessionId };
 }
 
 /**

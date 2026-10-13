@@ -35,6 +35,9 @@
  *   POST   /accounts/import-cookies  用「豆包账号桥」扩展送来的 cookie 建账号（不扫码）
  *        body { name, accountType, cookies: chrome.cookies.Cookie[], browserAccounts, multiSidsRaw }
  *        browserAccounts = multi_sids 解析出的全部账号 ⇒ 一次把浏览器里的多个账号都建出来
+ *   GET    /browsers            本机装着的浏览器（含"是否正在运行""是否登录过豆包"）
+ *   POST   /browsers/sync       从指定浏览器读已登录的豆包账号  body { id }
+ *        ⚠️ 该浏览器必须已退出；无头启动一次读 NetLog 里的 Cookie，读完即删日志
  *   POST   /accounts/:id/login  重新扫码登录
  *   DELETE /accounts/:id        删除账号
  *   POST   /generate            生成视频（自动选号，返回 base64）
@@ -297,6 +300,54 @@ async function loginAccount(id: string): Promise<{ ok: boolean; error?: string }
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    running = false;
+  }
+}
+
+/**
+ * 从「用户指定的浏览器」同步已登录的豆包账号。
+ *
+ * 与扩展 / 登录窗走**完全相同的落库路径**（`importCookies`），只是 cookie 来源不同：
+ * 这里是用浏览器自带的 NetLog 把请求头里的 Cookie 取出来（见 core.captureBrowserSession）。
+ */
+async function syncFromBrowser(id: string): Promise<{
+  ok: boolean;
+  error?: string;
+  browser?: string;
+  total?: number;
+  created?: number;
+  updated?: number;
+  accounts?: Array<{ id: string; name: string; uid: string; loggedIn: boolean; created: boolean }>;
+}> {
+  if (running) return { ok: false, error: "生成任务执行中，同步只占用几秒，请稍后再试" };
+  const core = await loadCore();
+  const candidate = (core.listBrowserCandidates() as Array<{ id: string; name: string }>).find((item) => item.id === id);
+  if (!candidate) return { ok: false, error: "没找到这个浏览器（可能已卸载或路径变了）" };
+  running = true;
+  try {
+    const captured = await core.captureBrowserSession(candidate);
+    const result = await core.importCookies({
+      cookies: captured.cookies,
+      browserAccounts: captured.browserAccounts,
+      accountType: "doubao",
+    });
+    const list = result.accounts ?? [];
+    await log(
+      `从 ${candidate.name} 同步完成：共 ${list.length} 个账号（新增 ${result.created}、更新 ${result.updated}）`,
+    );
+    return {
+      ok: true,
+      browser: candidate.name,
+      total: list.length,
+      created: result.created,
+      updated: result.updated,
+      accounts: list.map((a: any) => ({ id: a.id, name: a.name, uid: a.uid, loggedIn: a.loggedIn, created: a.created })),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await log(`从 ${candidate.name} 同步失败：${message}`);
+    return { ok: false, error: message };
   } finally {
     running = false;
   }
@@ -686,6 +737,18 @@ async function route(request: Request): Promise<Response> {
           "Content-Disposition": 'attachment; filename="doubao-cookie-bridge.crx"',
         },
       });
+    }
+
+    // 本机装了哪些浏览器（给引导页的「选择要同步的浏览器」用）。
+    if (pathname === "/browsers" && request.method === "GET") {
+      const core = await loadCore();
+      return Response.json({ ok: true, browsers: core.listBrowserCandidates() });
+    }
+
+    // 从指定的浏览器同步已登录的豆包账号（不需要装扩展）。
+    if (pathname === "/browsers/sync" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      return Response.json(await syncFromBrowser(String(body?.id ?? "")));
     }
 
     // 扫码登录 / 生成跑在哪个浏览器内核里（换内核会让已有登录态失效，界面上要警示）。

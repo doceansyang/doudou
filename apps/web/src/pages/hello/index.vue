@@ -78,6 +78,52 @@
         </div>
       </div>
     </div>
+
+    <!-- 选浏览器：本机装了哪些浏览器就列哪些，用户挑一个同步它里面已登录的豆包账号。 -->
+    <el-dialog
+      v-model="browserPickerVisible"
+      title="选择要同步的浏览器"
+      width="min(460px, calc(100vw - 32px))"
+      alignCenter
+      appendToBody
+      :closeOnClickModal="!browserBusy"
+      :closeOnPressEscape="!browserBusy"
+      :showClose="!browserBusy">
+      <p class="pickerHint">
+        将从你选的浏览器里读取<b>已登录的豆包账号</b>（只读，账号只保存在本机）。<br />
+        该浏览器<b>需要先完全退出</b>——它运行时登录数据被占用，读不到。
+      </p>
+
+      <div v-if="browserLoading" class="pickerState">正在扫描本机浏览器…</div>
+      <ul v-else-if="browsers.length" class="pickerList">
+        <li v-for="item in browsers" :key="item.id">
+          <button
+            type="button"
+            class="pickerItem"
+            :class="{ selected: pickedBrowser === item.id }"
+            :disabled="item.running || browserBusy"
+            :aria-pressed="pickedBrowser === item.id"
+            @click="pickedBrowser = item.id">
+            <span class="pickerName">{{ item.name }}</span>
+            <el-tag v-if="item.running" size="small" type="warning">正在运行，请先退出</el-tag>
+            <el-tag v-else-if="item.hasDoubao === true" size="small" type="success">登录过豆包</el-tag>
+            <el-tag v-else-if="item.hasDoubao === false" size="small" type="info">未检测到豆包</el-tag>
+            <el-tag v-else size="small" type="info">读不到（可能被占用）</el-tag>
+          </button>
+        </li>
+      </ul>
+      <div v-else class="pickerState">没有扫描到可用的浏览器。</div>
+
+      <el-alert v-if="browserError" class="pickerError" :title="browserError" type="error" :closable="false" showIcon />
+
+      <template #footer>
+        <el-button text :disabled="browserBusy" @click="useScanInstead">改用扫码登录</el-button>
+        <el-button :disabled="browserBusy" @click="browserPickerVisible = false">取消</el-button>
+        <el-button type="primary" :loading="browserBusy" :disabled="!pickedBrowser || browsers.length === 0" @click="syncPickedBrowser">
+          开始同步
+        </el-button>
+      </template>
+    </el-dialog>
   </main>
 </template>
 
@@ -155,6 +201,93 @@ function pickUsable(accounts: LocalAccount[]): LocalAccount | undefined {
   return accounts.find(account => account.hasLoggedIn && account.remaining > 0);
 }
 
+/* ------------------------------------------------ 选择「哪个浏览器」来同步 */
+
+/** 本机扫到的浏览器（`GET /browsers`）。hasDoubao=null 表示读不到（浏览器在跑）。 */
+type BrowserItem = { id: string; name: string; running: boolean; hasDoubao: boolean | null };
+
+const browserPickerVisible = ref(false);
+const browserLoading = ref(false);
+const browserBusy = ref(false);
+const browserError = ref("");
+const browsers = ref<BrowserItem[]>([]);
+const pickedBrowser = ref("");
+
+async function fetchBrowsers(): Promise<BrowserItem[]> {
+  const response = await axios.get<{ browsers?: BrowserItem[] }>(`${RPA_URL}/browsers`, { timeout: 8000 });
+  return Array.isArray(response.data?.browsers) ? response.data.browsers : [];
+}
+
+async function loadBrowsers() {
+  browserLoading.value = true;
+  browserError.value = "";
+  try {
+    browsers.value = await fetchBrowsers();
+    // 默认选中"最可能有豆包登录、且没在运行"的那个
+    const best =
+      browsers.value.find(item => !item.running && item.hasDoubao === true) ??
+      browsers.value.find(item => !item.running) ??
+      browsers.value[0];
+    pickedBrowser.value = best?.id ?? "";
+  } catch {
+    browserError.value = "没连上本机的豆包服务，请稍后重试。";
+    browsers.value = [];
+    pickedBrowser.value = "";
+  } finally {
+    browserLoading.value = false;
+  }
+}
+
+async function openBrowserPicker() {
+  browserPickerVisible.value = true;
+  pickedBrowser.value = "";
+  await loadBrowsers();
+}
+
+/** 同步完成（或扫码完成）后：重新拉一次账号池并进入创作。 */
+async function enterAfterSync() {
+  const after = await fetchLocalAccounts().catch(() => [] as LocalAccount[]);
+  const picked = pickUsable(after) ?? after.find(account => account.hasLoggedIn);
+  await enterWorkspace(picked?.name);
+}
+
+/**
+ * 从选中的浏览器同步已登录的豆包账号。
+ *
+ * 服务端会用这个浏览器**真实的用户数据目录**无头启动一次，从它自己发出的请求里
+ * 读出 cookie（浏览器内部解密，我们不解密任何东西），顺带把 `multi_sids` 里的
+ * **全部账号**一起取回来。所以浏览器必须处于**已退出**状态。
+ */
+async function syncPickedBrowser() {
+  if (!pickedBrowser.value || browserBusy.value) return;
+  browserBusy.value = true;
+  browserError.value = "";
+  try {
+    const response = await axios.post(`${RPA_URL}/browsers/sync`, { id: pickedBrowser.value }, { timeout: 120000 });
+    const data = response.data as { ok?: boolean; error?: string; total?: number };
+    if (!data?.ok) throw new Error(data?.error || "同步失败");
+    browserPickerVisible.value = false;
+    ElMessage.success(data.total ? `已同步 ${data.total} 个豆包账号` : "已同步");
+    await enterAfterSync();
+  } catch (error) {
+    browserError.value = axios.isAxiosError(error)
+      ? (error.response?.data as { error?: string })?.error || error.message
+      : error instanceof Error
+      ? error.message
+      : "同步失败";
+    // 刷新一下"是否正在运行"，方便用户退掉浏览器后直接重试
+    void loadBrowsers();
+  } finally {
+    browserBusy.value = false;
+  }
+}
+
+/** 不用浏览器同步，改用我们自己的登录窗口扫码。 */
+async function useScanInstead() {
+  browserPickerVisible.value = false;
+  if (await openScanLogin()) await enterAfterSync();
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => { window.setTimeout(resolve, ms); });
 }
@@ -178,7 +311,7 @@ async function enterWorkspace(accountName?: string) {
  * 扫码一次后登录态长期留在本机，之后完全不用再登。
  */
 async function useLocalAccount() {
-  if (saving.value || scanning.value) return;
+  if (saving.value || scanning.value || browserPickerVisible.value) return;
   saving.value = true;
   try {
     let accounts: LocalAccount[];
@@ -194,11 +327,17 @@ async function useLocalAccount() {
       return;
     }
 
-    // 没有可用账号 —— 打开登录窗口等扫码（新用户就是在这一步「获取」）。
+    // 没有可用账号：先扫本机浏览器，让用户挑一个同步（命中就直接进）；
+    // 一个浏览器都没扫到才退回"我们自己的登录窗口扫码"。
+    const candidates = await fetchBrowsers().catch(() => [] as BrowserItem[]);
+    if (candidates.length) {
+      saving.value = false;
+      await openBrowserPicker();
+      return;
+    }
+
     if (!(await openScanLogin())) return; // 取消 / 超时 / 窗口被关，原因已在里面说明
-    const after = await fetchLocalAccounts().catch(() => [] as LocalAccount[]);
-    const picked = pickUsable(after) ?? after.find(account => account.hasLoggedIn);
-    await enterWorkspace(picked?.name);
+    await enterAfterSync();
   } catch {
     ElMessage.error("获取本地账号失败，请重试");
   } finally {
@@ -705,6 +844,82 @@ onBeforeUnmount(() => {
       display: none;
     }
   }
+}
+
+/* ---------- 「选择要同步的浏览器」弹窗 ----------
+   ⚠️ 弹窗是 `appendToBody` 的，DOM 挂在 body 下，**不能**写成 `.hello .pickerItem`
+   这类后代选择器（匹配不到）；scoped 属性在元素上仍然带着，所以平级写即可。 */
+.pickerHint {
+  margin: 0 0 14px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.8;
+
+  b {
+    color: var(--el-text-color-primary);
+    font-weight: 600;
+  }
+}
+
+.pickerState {
+  padding: 14px 0;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.pickerList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+
+  li + li {
+    margin-top: 6px;
+  }
+}
+
+.pickerItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: var(--ui-radius);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: start;
+  cursor: pointer;
+  transition: border-color 150ms ease, background-color 150ms ease;
+
+  &:hover:not(:disabled) {
+    border-color: var(--el-color-primary-light-5);
+  }
+
+  &.selected {
+    border-color: var(--el-color-primary);
+    background: var(--el-color-primary-light-9);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: 2px;
+  }
+
+  .pickerName {
+    font-weight: 600;
+  }
+}
+
+.pickerError {
+  margin-top: 12px;
 }
 
 /* keyframes 必须放在选择器外面（放 .hello 里会编译出非法嵌套规则）。 */
