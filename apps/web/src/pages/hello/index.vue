@@ -30,12 +30,13 @@
         <h1 id="welcomeTitle">快速开始</h1>
         <p class="description">用本机浏览器里已登录的豆包账号即可开始创作，无需注册。</p>
 
-        <el-button class="loginButton" type="primary" :loading="saving" @click="useLocalAccount">
+        <!-- 两个动作按钮**同一规格**（宽/高/内边距/圆角/字号/字重完全一致），
+             先后顺序即主次：先「用本地豆包账号」，再「登录 Linke」。 -->
+        <el-button class="actionButton" type="primary" :loading="saving" @click="useLocalAccount">
           <icon-cloud-download class="buttonIcon" />
           一键获取本地账号
         </el-button>
-        <!-- 次选动作：紧跟主按钮下方、与它同宽，形成「主 / 次」两层 -->
-        <el-button class="linkeButton" :loading="saving" @click="openLogin">
+        <el-button class="actionButton" type="primary" :loading="saving" @click="openLogin">
           <icon-login class="buttonIcon" />
           登录 Linke 自动配置
         </el-button>
@@ -358,29 +359,22 @@ onBeforeUnmount(() => {
         margin-inline-end: 8px;
       }
 
-      .loginButton {
+      /* 首屏两个动作按钮：**同一规格** —— 宽/高/内边距/圆角/字号/字重完全一致，
+         用上下顺序表达先后，而不是靠"一大一小"拉开差距。 */
+      .actionButton {
         width: 100%;
         height: auto;
         min-height: 50px;
+        margin: 0;
         padding: 12px;
         white-space: normal;
         border-radius: calc(var(--ui-radius) * 1.625);
         font-size: 16px;
         font-weight: 600;
-      }
 
-      /* 次选动作：与主按钮同宽、紧跟其下，形成清晰的「主 / 次」两层。
-         所以只沿用默认线框样式（不设 type），尺寸比主按钮收一档。 */
-      .linkeButton {
-        width: 100%;
-        height: auto;
-        min-height: 44px;
-        margin: 12px 0 0;
-        padding: 10px 12px;
-        white-space: normal;
-        border-radius: calc(var(--ui-radius) * 1.375);
-        font-size: 14px;
-        font-weight: 500;
+        & + .actionButton {
+          margin-top: 12px;
+        }
       }
 
       .secondaryActions {
