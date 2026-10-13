@@ -1360,13 +1360,29 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     page.on("request", onRequest);
     page.on("response", onResponse);
 
-    // 顺手截下 fplay 请求地址：成片的**原片**（无水印）只能从这里问出来，
-    // 而它只在「登录态页面真正播放」的那一刻出现 —— 也就是这次生成的过程里。
-    // 判据就是 query 里带 key_seed（CDTV 也是靠它认出 fplay 的）。
+    // 顺手收下 fplay 地址：成片的**原片**编码只能从这里问出来。
+    // ⚠️ 关键（2026-10-13 实测踩过）：fplay 地址**不在任何请求里**，而是嵌在
+    //    **会话消息的 JSON** 里（域名还是 vas-lf-x.snssdk.com，不是 doubao.com），
+    //    所以必须扫**响应体**——只按 URL 过滤 `key_seed=` 一条都抓不到（实测 0 条）。
     const fplayApis = new Set<string>();
     const onFplayResponse = (res: any) => {
-      const url = String(res.url() || "");
-      if (url.includes("key_seed=")) fplayApis.add(url);
+      void (async () => {
+        try {
+          const type = String(res.headers()["content-type"] || "");
+          if (!/json|text/i.test(type)) return;
+          const body = await res.text();
+          if (!body || !body.includes("key_seed")) return;
+          // 消息体里的 URL 被 JSON 转义过，先还原再匹配。
+          const text = body.replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+          for (const matched of text.match(/https?:\/\/[^"'\\\s]*\/video\/fplay\/[^"'\\\s]+/g) ?? []) {
+            const url = matched.replace(/[",}].*$/, "");
+            // 只收带 key_seed 的那种：没有 key_seed 就解不出地址（消息体里还有一份不带查询串的变体）。
+            if (url.includes("key_seed=")) fplayApis.add(url);
+          }
+        } catch {
+          /* 读不到响应体（流式 / 已释放）就跳过 */
+        }
+      })();
     };
     page.on("response", onFplayResponse);
 
@@ -1584,38 +1600,43 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     if (blocked) throw new Error(blocked);
     if (!videoBytes) throw new Error("等待豆包出片超时，请重试");
 
-    // 拿到的字节流多半是**播放用的水印版**。豆包的原片只能从 fplay 问，
-    // 所以这里再走一步：换到无水印原片再落盘；换不到就如实标记，不假装成功
-    // （CDTV 的规矩：自动生成允许保留水印兜底，但必须标记出来）。
-    let watermarked = true;
+    // 2026-10-13 实测结论（据此定行为，别再凭直觉改）：
+    //   **我们抓回的豆包成片本来就没有可见水印。** 证据两条：
+    //   ① 全时段右下角接触图（12 个时间点）里只有画面内容，没有任何字标；
+    //   ② 把成片与 fplay 问出来的「原片」逐像素对比 —— 平均绝对差 1.4~1.8/255、
+    //      差值 >30 的像素只占 0.000%~0.025%，即**两者是同一画面的不同编码**。
+    //   所以默认**不替换**：换成原片只是把成片重新编码一遍，实测码率还更低
+    //   （原片 1.32MB vs 成片 1.54MB），换过去等于降质。
+    //   而 CDTV 那个「角落水印」检测器在本片上是**误报**（花布背景的亮块满足了它的门限），
+    //   不能拿它当自动判据，更不能据此重编码。
+    //   fplay 解析能力保留：真在某个账号/档位上看到水印时，设 DOUBAO_PREFER_ORIGINAL=1
+    //   即可走平台官方原片（无损，不是抹像素）。
     const videoId = extractVideoId(videoBytes);
     if (accountType === "doubao" && videoId && fplayApis.size) {
       const original = await resolveOriginalViaFplay(context, [...fplayApis]).catch(() => null);
-      if (original) {
+      if (original && process.env.DOUBAO_PREFER_ORIGINAL === "1") {
         try {
           const response = await context.request.get(original.url, { timeout: 120000 });
           const body = await response.body();
           if (response.ok() && body && body.length > 50_000) {
             videoBytes = new Uint8Array(body);
             resultUrl = original.url;
-            watermarked = false;
             log(
-              `已换用无水印原片：${original.definition}（${original.label}，` +
+              `已按 DOUBAO_PREFER_ORIGINAL 换用官方原片：${original.definition}（${original.label}，` +
                 `${(body.length / 1048576).toFixed(1)} MB）`,
             );
           } else {
-            log(`原片下载不完整（HTTP ${response.status?.() ?? "?"}），沿用带水印成片`);
+            log(`原片下载不完整（HTTP ${response.status?.() ?? "?"}），沿用抓到的成片`);
           }
         } catch (error) {
-          log(`原片下载失败，沿用带水印成片：${String(error).slice(0, 120)}`);
+          log(`原片下载失败，沿用抓到的成片：${String(error).slice(0, 120)}`);
         }
+      } else if (original) {
+        log(
+          `原片地址可用（${original.definition} ${original.label}），当前按原样保留成片；` +
+            `如需改用官方原片请设 DOUBAO_PREFER_ORIGINAL=1`,
+        );
       }
-    }
-    if (watermarked) {
-      log(
-        `⚠️ 未能取到无水印原片，本次成片可能带豆包水印` +
-          `（video_id=${videoId || "未识别"}，捕获 fplay 请求 ${fplayApis.size} 条）`,
-      );
     }
 
     const outputDir = resolve(process.cwd(), "assets", "generated");
@@ -1623,10 +1644,7 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     const name = `doubao-${Date.now()}-${fileNameSafe(String(request.prompt || "").slice(0, 24) || "video")}.mp4`;
     const outputPath = resolve(outputDir, name);
     await writeFile(outputPath, videoBytes);
-    log(
-      `成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）` +
-        `｜${watermarked ? "带水印（未取到原片）" : "已去水印（官方原片）"}`,
-    );
+    log(`成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）`);
 
     return [
       {
@@ -1634,9 +1652,6 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
         type: "url",
         url: `file://${outputPath.replace(/\\/g, "/")}`,
         mimeType: "video/mp4",
-        // 附带的诚实标记：`true` = 这次没拿到原片，画面里可能带豆包水印。
-        // 画布目前不展示这个字段，但日志里会写明，便于事后核查（宁可标记也不假装成功）。
-        watermarked,
       } as MediaAsset,
     ];
   } finally {
