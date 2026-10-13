@@ -28,9 +28,14 @@
       </div>
       <div v-else class="welcomeContent">
         <h1 id="welcomeTitle">快速开始</h1>
-        <p class="description">选择登录Linke可直接自动配置，无需任何复杂操作，即可开始创作。</p>
+        <p class="description">用本机浏览器里已登录的豆包账号即可开始创作，无需注册。</p>
 
-        <el-button class="loginButton" type="primary" @click="openLogin">
+        <el-button class="loginButton" type="primary" :loading="saving" @click="useLocalAccount">
+          <icon-cloud-download class="buttonIcon" />
+          一键获取本地账号
+        </el-button>
+        <!-- 次选动作：紧跟主按钮下方、与它同宽，形成「主 / 次」两层 -->
+        <el-button class="linkeButton" :loading="saving" @click="openLogin">
           <icon-login class="buttonIcon" />
           登录 Linke 自动配置
         </el-button>
@@ -95,6 +100,54 @@ function openLogin() {
   loginUrl.value = url.href;
   loginKey.value = loginError.value = "";
   view.value = "login";
+}
+
+/* -------------------------------------------------- 一键获取本地账号 */
+
+/** 本机豆包账号池服务（随主服务自动启动），与 provider 里的默认地址一致。 */
+const RPA_URL = "http://127.0.0.1:18077";
+
+type LocalAccount = { id: string; name: string; hasLoggedIn: boolean; remaining: number };
+
+async function fetchLocalAccounts(): Promise<LocalAccount[]> {
+  const response = await axios.get<{ accounts?: LocalAccount[] }>(`${RPA_URL}/accounts`, { timeout: 6000 });
+  return Array.isArray(response.data?.accounts) ? response.data.accounts : [];
+}
+
+/**
+ * 「一键获取本地账号」——直接拿本机浏览器里已登录的豆包账号开始创作。
+ *
+ * 这里**不搬 cookie**：搬 cookie 必须由「豆包账号桥」扩展在浏览器里完成
+ * （浏览器禁止外部程序读取 cookie 存储，见 tools/doubao-cookie-bridge/）。
+ * 这个按钮负责的是「检测本机有没有可用账号」并把结果如实告诉用户，
+ * 有就放行进入，没有就给出两条明确出路，而不是让人卡在这一屏。
+ */
+async function useLocalAccount() {
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    let accounts: LocalAccount[];
+    try {
+      accounts = await fetchLocalAccounts();
+    } catch {
+      ElMessage.warning("没连上本机的豆包服务，请稍后重试；或先用「登录 Linke 自动配置」。");
+      return;
+    }
+    const usable = accounts.filter(account => account.hasLoggedIn && account.remaining > 0);
+    if (!usable.length) {
+      ElMessage.warning("还没检测到本地豆包账号。请在浏览器登录豆包并装好「豆包账号桥」扩展，或先点「登录 Linke 自动配置」。");
+      return;
+    }
+    // 沿用现有供应商设置：豆包账号是内置供应商，无需额外写 key。
+    await hello.complete();
+    anonymousData.track("onboarding.complete");
+    ElMessage.success(`已获取本地账号：${usable[0].name}`);
+    await router.replace("/home");
+  } catch {
+    ElMessage.error("获取本地账号失败，请重试");
+  } finally {
+    saving.value = false;
+  }
 }
 
 async function completeSetup() {
@@ -316,13 +369,27 @@ onBeforeUnmount(() => {
         font-weight: 600;
       }
 
+      /* 次选动作：与主按钮同宽、紧跟其下，形成清晰的「主 / 次」两层。
+         所以只沿用默认线框样式（不设 type），尺寸比主按钮收一档。 */
+      .linkeButton {
+        width: 100%;
+        height: auto;
+        min-height: 44px;
+        margin: 12px 0 0;
+        padding: 10px 12px;
+        white-space: normal;
+        border-radius: calc(var(--ui-radius) * 1.375);
+        font-size: 14px;
+        font-weight: 500;
+      }
+
       .secondaryActions {
         display: flex;
         flex-wrap: wrap;
         align-items: center;
         justify-content: center;
         gap: 10px;
-        margin-top: 20px;
+        margin-top: 16px;
 
         .separator {
           color: var(--el-text-color-secondary);
