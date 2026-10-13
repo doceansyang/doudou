@@ -22,6 +22,15 @@ INSTALLED = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "JinyuT
 PORTABLE = os.path.join(BASE, "JinyuTV-portable")
 TARGETS = [PORTABLE, INSTALLED]
 SKIP = (".bak", ".prebuild", ".manual", ".empty")
+# RPA（豆包自动化）在实例里跑的是 scripts/ 下的这些源码，白名单同步（别铺整个目录）。
+RPA_SCRIPTS = (
+    "doubao-accounts.ts",
+    "doubao-rpa-core.ts",
+    "doubao-rpa-service.ts",
+    "doubao-watermark.ts",
+    "doubao-deshadow.ts",
+    "deshadow-doubao.py",
+)
 
 NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -108,6 +117,26 @@ def sync_provider_sources():
         print("--- 同步供应商适配器 -> %s（%d 个文件）" % (dst, n))
 
 
+def sync_rpa_scripts():
+    """RPA（豆包浏览器自动化）跑的是**实例里 scripts/ 下的源码**（bun 直接跑 .ts），
+    所以改了 RPA 相关文件必须同步过去，否则实例仍在跑旧代码（这个坑踩过一次：
+    「去水印」改了却没生效，就是这里没同步）。只同步白名单，**不要**把整个
+    scripts/ 铺过去（里面全是开发脚本与探针）。"""
+    src_dir = os.path.join(PROJECT, "scripts")
+    for root in TARGETS:
+        dst = os.path.join(root, "scripts")
+        if not os.path.isdir(os.path.dirname(dst)):
+            continue
+        os.makedirs(dst, exist_ok=True)
+        n = 0
+        for name in RPA_SCRIPTS:
+            src = os.path.join(src_dir, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(dst, name))
+                n += 1
+        print("--- 同步 RPA 脚本 -> %s（%d 个文件）" % (dst, n))
+
+
 def stop_ports(ports=(3000, 18077)):
     out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
                          encoding="utf-8", errors="replace").stdout
@@ -181,5 +210,6 @@ if __name__ == "__main__":
         sync_web()
     stop_ports()
     sync_provider_sources()
+    sync_rpa_scripts()
     restart_installed()
     check()

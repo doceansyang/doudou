@@ -5,6 +5,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { ACCOUNT_PLATFORMS, normalizeAccountType, type AccountType } from "./doubao-accounts.ts";
+import { deshadowVideo } from "./doubao-deshadow.ts";
 import { compareForWatermark } from "./doubao-watermark.ts";
 
 /**
@@ -1616,53 +1617,17 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     })();
     log(`成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）｜来源 ${sourceHost}`);
 
-    // ── 有条件的「去水印」───────────────────────────────────────────────
-    // 判据不是"认水印长什么样"，而是**拿平台原片当参照物做 A/B 差分**：
-    // 同一画面的两种编码差值是零散压缩噪声（外接框铺满画面、填充率≈0），
-    // 而水印只存在于其中一份里，会单独暴露成**一小块实心区域**。
-    // 判定动作也是安全的：判有水印 → 换成官方原片（无损，不是抹像素）；
-    // 判没有 → 原样保留、不做任何重编码（避免白白降质）。
-    // 详细依据与实测数字见 doubao-watermark.ts 顶部。
-    const videoId = extractVideoId(videoBytes);
-    if (accountType === "doubao" && videoId) {
-      if (!fplayApis.size) {
-        log(`未捕获到 fplay 地址，跳过水印判定（video_id=${videoId}）`);
-      } else {
-        const original = await resolveOriginalViaFplay(context, [...fplayApis]).catch(() => null);
-        if (!original) {
-          log(`未能解析出平台原片，跳过水印判定`);
-        } else {
-          const tempPath = resolve(outputDir, `.original-${Date.now()}.mp4`);
-          try {
-            const response = await context.request.get(original.url, { timeout: 120000 });
-            const body = await response.body();
-            if (!response.ok() || !body || body.length <= 50_000) {
-              log(`原片下载不完整（HTTP ${response.status?.() ?? "?"}），保持原样`);
-            } else {
-              await writeFile(tempPath, body);
-              const verdict = await compareForWatermark(outputPath, tempPath);
-              log(`水印判定：${verdict.reason}`);
-              if (verdict.watermarked) {
-                // 抓取版留一份存档：万一判错也能追回来，不销毁证据。
-                const archived = outputPath.replace(/\.mp4$/, ".抓取版.mp4");
-                await writeFile(archived, videoBytes);
-                await writeFile(outputPath, body);
-                videoBytes = new Uint8Array(body);
-                log(
-                  `已换用平台原片（${original.definition} ${original.label}，` +
-                    `${(body.length / 1048576).toFixed(1)} MB）｜区域 ${JSON.stringify(verdict.box)}｜抓取版存档 ${archived}`,
-                );
-              } else {
-                log("未检出差异区域，保留抓到的成片（不重编码）");
-              }
-            }
-          } catch (error) {
-            log(`原片比对失败，保持原样：${String(error).slice(0, 140)}`);
-          } finally {
-            await rm(tempPath, { force: true }).catch(() => undefined);
-          }
-        }
-      }
+    // ── 去水印（链路里的一道自动工序）──────────────────────────────────
+    // 豆包「AI生成」是**半透明白字**，会在画面**左上/右下之间来回跳**；而平台**不给
+    // 无水印版**（get_play_info 的 media_info 与 original_media_info 是同一 URL，
+    // 删/改 lr 参数下载 SHA 完全相同 —— 实测过，"换原片"那条路是死的）。
+    // 所以这里做像素修复：有 Python+OpenCV 走 inpaint（效果最自然），否则 ffmpeg delogo 兜底。
+    // 任何一步失败都保留原始成片，绝不让去水印把出片搞失败。
+    const deshadow = await deshadowVideo(outputPath, log);
+    if (deshadow.applied) {
+      log(`去水印完成（${deshadow.method}）：${deshadow.detail}`);
+    } else {
+      log(`水印未处理，保留原始成片：${deshadow.detail}`);
     }
 
     return [
