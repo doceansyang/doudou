@@ -91,6 +91,14 @@ export type DoubaoAccount = {
    * 靠它认出「这还是同一个账号」，改成更新而不是新建。
    */
   sessionFingerprint: string;
+  /**
+   * 平台侧的稳定身份（豆包 user_id，如 `1234567890123456`）。
+   *
+   * 与 `sessionFingerprint` 的区别：指纹跟着「这一次登录」变（重新登录就换一份），
+   * uid 是账号本身的身份、不会变。去重**优先用它** —— 否则用户重登一次同一账号，
+   * 账号池里就会多出一个重复项。
+   */
+  doubaoUid: string;
 };
 
 const ACCOUNTS_FILE = resolve(process.cwd(), "data", "doubao", "accounts.json");
@@ -131,6 +139,7 @@ function normalize(account: Partial<DoubaoAccount>, index: number): DoubaoAccoun
     lastUsedAt: String(account.lastUsedAt || ""),
     note: String(account.note || ""),
     sessionFingerprint: String((account as { sessionFingerprint?: unknown }).sessionFingerprint || ""),
+    doubaoUid: String((account as { doubaoUid?: unknown }).doubaoUid || ""),
   };
 }
 
@@ -299,6 +308,29 @@ export async function setSessionFingerprint(id: string, fingerprint: string): Pr
   const account = accounts.find((a) => a.id === id);
   if (!account) return;
   account.sessionFingerprint = fingerprint;
+  await saveAccounts(accounts);
+}
+
+/**
+ * 记下账号在平台侧的稳定身份 + 展示名（从浏览器同步 / 扫码登录后都走它）。
+ *
+ * 只传想要更新的字段，其余保持原样。
+ */
+export async function setAccountIdentity(
+  id: string,
+  identity: { uid?: string; fingerprint?: string; name?: string; hasLoggedIn?: boolean },
+): Promise<void> {
+  const accounts = await loadAccounts();
+  const account = accounts.find((a) => a.id === id);
+  if (!account) return;
+  if (identity.uid) account.doubaoUid = identity.uid;
+  if (identity.fingerprint) account.sessionFingerprint = identity.fingerprint;
+  // 昵称只在真的拿到时覆盖，别用空串把用户改过的名字冲掉
+  if (identity.name && identity.name.trim()) account.name = identity.name.trim();
+  if (identity.hasLoggedIn !== undefined) {
+    account.hasLoggedIn = identity.hasLoggedIn;
+    if (identity.hasLoggedIn) account.quotaExhaustedOn = ""; // 重新登录视为恢复可用
+  }
   await saveAccounts(accounts);
 }
 

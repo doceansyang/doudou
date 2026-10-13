@@ -8,11 +8,9 @@ import {
   ACCOUNT_PLATFORMS,
   addAccount,
   loadAccounts,
-  markLoggedIn,
   normalizeAccountType,
-  setSessionFingerprint,
+  setAccountIdentity,
   type AccountType,
-  type DoubaoAccount,
 } from "./doubao-accounts.ts";
 import { deshadowVideo } from "./doubao-deshadow.ts";
 
@@ -1380,15 +1378,50 @@ function toPlaywrightCookie(raw: ImportedCookie): Record<string, unknown> | null
 }
 
 /**
- * 用「本机浏览器里已登录的豆包账号」直接建一个账号（不用扫码）。
+ * 用「本机浏览器里已登录的豆包账号」直接建账号（不用扫码）。
  *
  * 为什么必须靠扩展送 cookie：cookie 库从 Chromium 127 起用 App-Bound 加密，
  * 离线解不开、复制 profile 会被路径校验清空（见项目记忆），
  * 而扩展读的是浏览器自己的 cookie store（含 HttpOnly 的 `sessionid`），不受这层限制。
+ *
+ * ⚠️ 多账号（2026-10-13 实测定案）：豆包网页端**支持同一个浏览器登录多个账号并切换**
+ * （头像菜单「更多账号 / 添加账号」）。全部账号的会话 id 都在 `multi_sids` cookie 里，
+ * 格式 `<uid>:<sessionid>`；而**光一个 `sessionid` 就足以认证**（实测：只写一条
+ * sessionid 去问 /passport/account/info/ 即返回 user_id）。所以「一个浏览器只能出一个
+ * 账号」的旧判断是错的 —— 解析清单逐个建号即可，不需要多个浏览器各装一次扩展。
  */
+
+/** 浏览器里登录的一个豆包账号（来自 `multi_sids` cookie）。 */
+export type BrowserAccount = { uid?: string; sessionId: string };
+
 /**
- * 登录态指纹：用 `sessionid` + `sid_tt` 算 hash。
- * 同一个浏览器反复推的是同一份登录态，靠它认出来（去重用）。
+ * 从 `multi_sids` / `x-tt-multi-sids` 的值里解析出**全部**已登录账号。
+ *
+ * 实测值形如 `1234567890123456%3A7bebca…`（URL 编码把 `:` 写成 `%3A`）。
+ * 多账号时是多个这样的片段拼接，分隔符官方没有承诺 —— 所以这里全文捞出所有
+ * `uid:sessionid` 对，**不依赖分隔符**，豆包改版也不会失配。
+ */
+export function parseBrowserAccounts(raw: unknown): BrowserAccount[] {
+  let text = String(raw ?? "").trim();
+  if (!text) return [];
+  try {
+    text = decodeURIComponent(text);
+  } catch {
+    // 解码失败就按原样匹配（值里可能本来就是裸冒号）
+  }
+  const out: BrowserAccount[] = [];
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/(\d{6,20})\s*[:：]\s*([A-Za-z0-9_-]{16,128})/g)) {
+    const sessionId = match[2];
+    if (seen.has(sessionId)) continue;
+    seen.add(sessionId);
+    out.push({ uid: match[1], sessionId });
+  }
+  return out;
+}
+
+/**
+ * 登录态指纹：同一个浏览器反复推的是同一份登录态，靠它认出来（去重用）。
  */
 function loginFingerprint(cookies: ImportedCookie[]): string {
   const read = (name: string) => String(cookies.find((item) => String(item.name) === name)?.value ?? "").trim();
@@ -1396,27 +1429,133 @@ function loginFingerprint(cookies: ImportedCookie[]): string {
   return createHash("sha256").update(`${read("sessionid")}|${read("sid_tt")}`).digest("hex").slice(0, 32);
 }
 
-export async function importCookies(request: {
-  cookies?: ImportedCookie[];
-  name?: string;
-  accountType?: string;
-}): Promise<{ account: DoubaoAccount; loggedIn: boolean; accepted: number; dropped: number; created: boolean }> {
-  const type = normalizeAccountType(request.accountType);
-  const platform = ACCOUNT_PLATFORMS[type];
-  const incoming = Array.isArray(request.cookies) ? request.cookies : [];
-  // 空包就别建账号了 —— 否则账号池里会多出一个永远登录不上的空壳。
-  if (!incoming.length) throw new Error("没有收到任何 cookie（请确认已在浏览器里登录豆包）");
+/**
+ * 只有 sessionid 时的指纹。
+ *
+ * 豆包侧 `sid_tt` 恒等于 `sessionid`，所以这里按 `sid|sid` 算 —— 跟
+ * `loginFingerprint()` 的口径完全一致。老账号记录里存的就是这个值，
+ * 口径不改才不会在升级后把同一个账号又当成新账号建一遍。
+ */
+function sessionFingerprint(sessionId: string): string {
+  return createHash("sha256").update(`${sessionId}|${sessionId}`).digest("hex").slice(0, 32);
+}
 
-  // ⚠️ 必须去重：扩展在 cookie 变动时推一次、另有每 5 分钟兜底推一次。
-  // 原实现每次都 addAccount，同一份登录态会把账号池一遍遍撑大。
-  const fingerprint = loginFingerprint(incoming);
-  const existing = fingerprint
-    ? (await loadAccounts()).find((item) => item.accountType === type && item.sessionFingerprint === fingerprint)
-    : undefined;
-  const account = existing ?? (await addAccount(request.name, type));
+/** 单个账号的同步结果。 */
+export type ImportedAccountResult = {
+  id: string;
+  name: string;
+  uid: string;
+  loggedIn: boolean;
+  created: boolean;
+  accepted: number;
+  /** true = 这份登录态之前就同步过且有效，本次没做任何事（省掉一次浏览器启动）。 */
+  skipped: boolean;
+};
+
+/**
+ * 只靠一个 sessionid 拼出的最小 cookie 集。
+ *
+ * 实测只写 `sessionid` 一条就能认证；`sessionid_ss` / `sid_tt` 一起带上更稳妥
+ * （豆包侧 `sid_tt` 恒等于 `sessionid`）。其余 cookie（ttwid、csrf 等）不伪造，
+ * 由浏览器访问站点时自行补回来。
+ */
+function sessionCookies(sessionId: string, domain: string): ImportedCookie[] {
+  const host = domain.startsWith(".") ? domain : `.${domain}`;
+  const secure = true;
+  return [
+    { name: "sessionid", value: sessionId, domain: host, path: "/", secure, httpOnly: true, sameSite: "no_restriction" },
+    { name: "sessionid_ss", value: sessionId, domain: host, path: "/", secure, httpOnly: true, sameSite: "no_restriction" },
+    { name: "sid_tt", value: sessionId, domain: host, path: "/", secure, httpOnly: false, sameSite: "no_restriction" },
+  ];
+}
+
+/** 问豆包「当前这份登录态是谁」—— 顺带验证 sessionid 有效，并拿到昵称。 */
+async function fetchDoubaoIdentity(context: any): Promise<{ userId: string; name: string } | null> {
+  try {
+    const response = await context.request.get("https://accounts.doubao.com/passport/account/info/", {
+      headers: { Referer: "https://www.doubao.com/" },
+      timeout: 20000,
+    });
+    const body: any = await response.json();
+    const data = body?.data;
+    if (!data?.user_id) return null;
+    return { userId: String(data.user_id), name: String(data.screen_name || "").trim() };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读一个 profile 当前的登录身份（升级兼容用，见 importCookies 里的对齐步骤）。
+ * 读不到就返回空，不抛。
+ */
+async function readProfileIdentity(
+  profileDir: string,
+): Promise<{ sessionId: string; userId: string; name: string }> {
+  const empty = { sessionId: "", userId: "", name: "" };
+  try {
+    const context = await launchContext(profileDir, true);
+    try {
+      const cookies = await context.cookies(ACCOUNT_PLATFORMS.doubao.url);
+      const sessionId = String((cookies as any[]).find((c) => c.name === "sessionid")?.value ?? "").trim();
+      if (!sessionId) return empty;
+      const identity = await fetchDoubaoIdentity(context);
+      return { sessionId, userId: identity?.userId ?? "", name: identity?.name ?? "" };
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * 把一个「浏览器里的登录态」落成账号池里的一个账号。
+ *
+ * 传了完整 cookies 时原样写入（保真度最高）；只给了 sessionId 时用最小 cookie 集，
+ * 并让浏览器去站点走一趟把辅助 cookie 补回来（多账号场景）。
+ */
+async function importOneAccount(input: {
+  accountType: AccountType;
+  name?: string;
+  uid?: string;
+  sessionId?: string;
+  cookies?: ImportedCookie[];
+}): Promise<ImportedAccountResult> {
+  const type = input.accountType;
+  const platform = ACCOUNT_PLATFORMS[type];
+  const incoming = input.cookies ?? [];
+  const sessionId =
+    input.sessionId || String(incoming.find((item) => String(item.name) === "sessionid")?.value ?? "").trim();
+
+  const fingerprint = sessionId ? sessionFingerprint(sessionId) : loginFingerprint(incoming);
+
+  // ⚠️ 必须去重：扩展在 cookie 变动时推一次、另有每 5 分钟兜底推一次，浏览器里还可能
+  // 有多个账号 —— 每次都 addAccount 会把账号池撑爆。
+  // 优先按平台 uid 认人（重登同一个号不会多出一个），没有 uid 才退回指纹。
+  const all = await loadAccounts();
+  const existing =
+    (input.uid ? all.find((a) => a.accountType === type && a.doubaoUid && a.doubaoUid === input.uid) : undefined) ??
+    (fingerprint ? all.find((a) => a.accountType === type && a.sessionFingerprint === fingerprint) : undefined);
+
+  // 同一个账号、同一份登录态、上次已确认登录有效 ⇒ 直接跳过。
+  // 不跳过的话，扩展每 5 分钟兜底推一次就会反复拉起浏览器（每账号要跑一趟站点），白耗。
+  if (existing && fingerprint && existing.sessionFingerprint === fingerprint && existing.hasLoggedIn) {
+    return {
+      id: existing.id,
+      name: existing.name,
+      uid: existing.doubaoUid || input.uid || "",
+      loggedIn: true,
+      created: false,
+      accepted: 0,
+      skipped: true,
+    };
+  }
+  const account = existing ?? (await addAccount(input.name, type));
+
   const context = await launchContext(account.profileDir, true);
   try {
-    const mapped = incoming
+    const mapped = (incoming.length ? incoming : sessionCookies(sessionId, platform.domain))
       .map(toPlaywrightCookie)
       .filter((item): item is Record<string, unknown> => Boolean(item));
 
@@ -1427,28 +1566,109 @@ export async function importCookies(request: {
       for (const cookie of mapped) await context.addCookies([cookie] as any).catch(() => undefined);
     }
 
-    const stored = await context.cookies([platform.url]);
-    const loggedIn = stored.some(
-      (cookie: any) =>
-        (cookie.name === "sessionid" || cookie.name === "sessionid_ss") &&
-        String(cookie.value ?? "").trim(),
-    );
-    await markLoggedIn(account.id, loggedIn);
-    if (fingerprint) await setSessionFingerprint(account.id, fingerprint);
+    // 只给了 sessionid 时，让浏览器去站点走一趟，把 ttwid / csrf 等辅助 cookie 补回来。
+    if (!incoming.length) {
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto(platform.url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => undefined);
+      await page.waitForTimeout(2500);
+    }
+
+    const identity = await fetchDoubaoIdentity(context);
+    const loggedIn = Boolean(identity?.userId);
+    const finalName = input.name?.trim() || identity?.name || "";
+    await setAccountIdentity(account.id, {
+      uid: input.uid || identity?.userId || "",
+      fingerprint,
+      name: finalName,
+      hasLoggedIn: loggedIn,
+    });
     log(
-      `从浏览器${existing ? "更新" : "导入"}账号 ${account.id}：收到 ${incoming.length} 条、写入 ${mapped.length} 条，` +
-        `登录态${loggedIn ? "有效" : "**未见 sessionid**"}`,
+      `从浏览器${existing ? "更新" : "导入"}账号「${finalName || account.name}」` +
+        `(@${identity?.userId || input.uid || "?"})：写入 ${mapped.length} 条，` +
+        `登录态${loggedIn ? "有效" : "**无法确认**"}`,
     );
     return {
-      account: { ...account, hasLoggedIn: loggedIn, sessionFingerprint: fingerprint || account.sessionFingerprint },
+      id: account.id,
+      name: finalName || account.name,
+      uid: identity?.userId || input.uid || "",
       loggedIn,
-      accepted: stored.length,
-      dropped: incoming.length - mapped.length,
       created: !existing,
+      accepted: mapped.length,
+      skipped: false,
     };
   } finally {
     await context.close().catch(() => undefined);
   }
+}
+
+export async function importCookies(request: {
+  cookies?: ImportedCookie[];
+  name?: string;
+  accountType?: string;
+  /** 浏览器里登录的**全部**账号（`multi_sids` 解析结果）。有值就以它为准，逐个建号。 */
+  browserAccounts?: BrowserAccount[];
+  /** `multi_sids` 原始值（仅日志 / 诊断用）。 */
+  multiSidsRaw?: string;
+}): Promise<{ accounts: ImportedAccountResult[]; created: number; updated: number; raw: string }> {
+  const type = normalizeAccountType(request.accountType);
+  const incoming = Array.isArray(request.cookies) ? request.cookies : [];
+  const listed = (Array.isArray(request.browserAccounts) ? request.browserAccounts : []).filter(
+    (item): item is BrowserAccount => Boolean(item && item.sessionId),
+  );
+
+  // 空包就别建账号了 —— 否则账号池里会多出一个永远登录不上的空壳。
+  if (!incoming.length && !listed.length) {
+    throw new Error("没有收到任何 cookie（请确认已在浏览器里登录豆包）");
+  }
+
+  // 多账号：以清单为准逐个建号。清单里跟「当前生效 sessionid」相同的那一个，
+  // 把完整 cookies 一并写给它（保真度最高）；其余用最小集 + 访问站点补齐。
+  if (listed.length) {
+    const currentSessionId = String(incoming.find((item) => String(item.name) === "sessionid")?.value ?? "").trim();
+
+    // 升级兼容：升级前建的账号记录没有 uid / 指纹，先按它们**各自 profile 里的 sessionid**
+    // 对齐一次，免得同一个号多出一份。只对「两样都空」的老记录做，对齐后它就带指纹了，
+    // 下次同步直接跳过（不会反复读 profile）。
+    const blanks = (await loadAccounts()).filter(
+      (a) => a.accountType === type && !a.doubaoUid && !a.sessionFingerprint,
+    );
+    for (const blank of blanks) {
+      const profile = await readProfileIdentity(blank.profileDir);
+      if (!profile.sessionId) continue;
+      const hit = listed.find((item) => item.sessionId === profile.sessionId);
+      if (!hit) continue;
+      await setAccountIdentity(blank.id, {
+        uid: hit.uid || profile.userId,
+        fingerprint: sessionFingerprint(profile.sessionId),
+        name: profile.name,
+        hasLoggedIn: Boolean(profile.userId),
+      });
+      log(`老账号记录 ${blank.id} 对齐到「${profile.name || "?"}」(@${hit.uid || profile.userId || "?"})`);
+    }
+
+    const results: ImportedAccountResult[] = [];
+    for (const item of listed) {
+      results.push(
+        await importOneAccount({
+          accountType: type,
+          name: listed.length === 1 ? request.name : undefined,
+          uid: item.uid,
+          sessionId: item.sessionId,
+          cookies: item.sessionId === currentSessionId ? incoming : undefined,
+        }),
+      );
+    }
+    return {
+      accounts: results,
+      created: results.filter((item) => item.created).length,
+      updated: results.filter((item) => !item.created).length,
+      raw: String(request.multiSidsRaw ?? ""),
+    };
+  }
+
+  // 兜底：没解析出清单时，按「当前这一份完整登录态」建号（老行为）。
+  const result = await importOneAccount({ accountType: type, name: request.name, cookies: incoming });
+  return { accounts: [result], created: result.created ? 1 : 0, updated: result.created ? 0 : 1, raw: "" };
 }
 
 /* ------------------------------------------------------------------ 主流程 */

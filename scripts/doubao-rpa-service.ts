@@ -208,40 +208,65 @@ async function loginAccount(id: string): Promise<{ ok: boolean; error?: string }
  * 数据来源是本机浏览器的「豆包账号桥」扩展（tools/doubao-cookie-bridge/）：
  * 它读浏览器自己的 cookie store，能拿到 HttpOnly 的 sessionid —— 这是绕开
  * Chromium App-Bound 加密的唯一零特权路径。
+ *
+ * ⚠️ 多账号：扩展除全量 cookie 外，还会把 `multi_sids`（`<uid>:<sessionid>` 清单）
+ * 一起送来。豆包网页端本来就支持一个浏览器登多个账号并切换，这里按清单**逐个建号**，
+ * 不再是「一个浏览器只同步出一个账号」。
  */
-async function importCookiesAccount(
-  cookies: unknown,
-  name?: string,
-  accountType: AccountType = "doubao",
-): Promise<{
+async function importCookiesAccount(body: {
+  cookies?: unknown;
+  name?: unknown;
+  accountType?: unknown;
+  /** 浏览器里登录的全部账号（multi_sids 解析结果）。 */
+  browserAccounts?: unknown;
+  /** multi_sids 原始值，仅日志 / 诊断用。 */
+  multiSidsRaw?: unknown;
+}): Promise<{
   ok: boolean;
   error?: string;
+  /** 本次同步到的全部账号。 */
+  accounts?: Array<{ id: string; name: string; uid: string; loggedIn: boolean; created: boolean }>;
+  total?: number;
+  created?: number;
+  updated?: number;
+  /** 兼容老调用方：第一个账号的信息。 */
   id?: string;
   name?: string;
   accountType?: AccountType;
   loggedIn?: boolean;
   adopted?: number;
-  /** true = 新建了账号；false = 这份登录态之前就在（更新了它，没多建）。 */
-  created?: boolean;
 }> {
   if (running) return { ok: false, error: "生成任务执行中，同步只占用几秒，请稍后再试" };
   running = true;
   try {
-    const type = normalizeAccountType(accountType);
+    const type = normalizeAccountType(body?.accountType);
     const core = await loadCore();
-    const result = await core.importCookies({ cookies, name, accountType: type });
+    const result = await core.importCookies({
+      cookies: body?.cookies as never,
+      name: typeof body?.name === "string" ? body.name : undefined,
+      accountType: type,
+      browserAccounts: body?.browserAccounts as never,
+      multiSidsRaw: typeof body?.multiSidsRaw === "string" ? body.multiSidsRaw : undefined,
+    });
+    const list = result.accounts ?? [];
+    const skipped = list.filter((a) => a.skipped).length;
     await log(
-      `从浏览器${result.created ? "新增" : "更新"}账号「${result.account.name}」：写入 ${result.accepted} 条，` +
-        `登录态${result.loggedIn ? "有效" : "**未拿到 sessionid**"}`,
+      `从浏览器同步完成：共 ${list.length} 个账号（新增 ${result.created}、更新 ${result.updated}、` +
+        `未变 ${skipped}）` +
+        (result.raw ? `；multi_sids=${result.raw}` : ""),
     );
+    const first = list[0];
     return {
       ok: true,
-      id: result.account.id,
-      name: result.account.name,
-      accountType: type,
-      loggedIn: result.loggedIn,
-      adopted: result.accepted,
+      accounts: list.map((a) => ({ id: a.id, name: a.name, uid: a.uid, loggedIn: a.loggedIn, created: a.created })),
+      total: list.length,
       created: result.created,
+      updated: result.updated,
+      id: first?.id,
+      name: first?.name,
+      accountType: type,
+      loggedIn: first?.loggedIn,
+      adopted: first?.accepted,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -563,11 +588,10 @@ async function route(request: Request): Promise<Response> {
     }
 
     // 浏览器扩展送来已登录的 cookie，直接建账号（不用扫码）。
+    // 带 browserAccounts 时是「多账号清单」，会一次性把浏览器里登录的账号全部建出来。
     if (pathname === "/accounts/import-cookies" && request.method === "POST") {
       const body = await request.json().catch(() => ({}));
-      return Response.json(
-        await importCookiesAccount(body?.cookies, body?.name, normalizeAccountType(body?.accountType)),
-      );
+      return Response.json(await importCookiesAccount(body ?? {}));
     }
 
     const loginMatch = /^\/accounts\/([^/]+)\/login$/.exec(pathname);    if (loginMatch && request.method === "POST") {

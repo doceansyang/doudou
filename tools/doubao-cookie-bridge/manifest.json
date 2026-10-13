@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "JinyuTV 豆包账号桥",
-  "version": "0.1.0",
-  "description": "把本机浏览器里已登录的豆包账号同步到 JinyuTV。数据只走本机 127.0.0.1，不上传任何服务器。",
+  "version": "0.2.0",
+  "description": "把本机浏览器里已登录的豆包账号同步到 JinyuTV（支持一个浏览器里的多个账号）。数据只走本机 127.0.0.1，不上传任何服务器。",
   "permissions": ["cookies", "alarms", "storage"],
   "host_permissions": [
     "https://*.doubao.com/*",
