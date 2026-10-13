@@ -675,7 +675,9 @@ function readNodeIndex(currentDirectory: string, signal: AbortSignal) {
   return pending;
 }
 
-// 说明：文档面板**不做任何过滤**，与原版一致。
+// 说明：文档面板只隐藏**内部点目录/文件**（`.agent` 这类运行时数据），见
+// `lib/workspaceFiles.ts` 的 isInternalEntry —— 过滤放在列表源头，文件树、快速打开、
+// 全文搜索三处入口共用，不必各写一遍。除此之外**不做任何过滤**。
 //
 // 曾经为了「只让用户看到自己的东西」而在这里隐藏了 assets/、画布文件与备份文件，
 // 结果是项目里的内容全被隐藏、面板变成「暂无文件」——把面板的核心价值（从这里打开

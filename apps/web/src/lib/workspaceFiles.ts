@@ -4,6 +4,21 @@ import { useWorkspaceStore } from "@/stores/workspace";
 import { registerApiLanguage } from "@/lib/i18n";
 
 type WorkspaceEntry = { name: string; path: string; type: "file" | "directory" };
+
+/**
+ * 内部条目（点开头）—— Agent 会话记录（`.agent/sessions/*.jsonl`）、临时状态等运行时数据，
+ * 不是用户的作品文件。它们一律不出现在面向用户的文件列表里：列出来只会被误点，而点开
+ * 必然报「未启用支持此文件的扩展，请到插件市场安装或启用」（`.jsonl` 没有对应查看器，
+ * 且单个会话日志常有几 MB）。
+ *
+ * ⚠️ 边界：只按「点开头」判断，**绝不碰任何用户内容**。assets/、画布文件（.json）、
+ * 备份文件都必须照常显示 —— 曾经用过滤去藏这些，结果面板被掏空成「暂无文件」，
+ * 把「从这儿打开画布、看到素材归属」这个核心价值一起删掉了。
+ */
+export function isInternalEntry(name: string) {
+  return name.startsWith(".");
+}
+
 export type TextSnapshot = { text: string; revision: string; encoding: "utf-8" | "utf-8-bom" | "utf-16le" | "utf-16be" };
 const client = axios.create({ baseURL: "/api/workspaces/files", headers: { "x-toonflow-workspace": "1" } });
 registerApiLanguage(client);
@@ -33,7 +48,9 @@ export default function useWorkspaceFiles(directory?: MaybeRefOrGetter<string | 
 
   async function list(path = "", signal?: AbortSignal) {
     const { data } = await client.get<{ data: { directory: string; empty: boolean; entries: WorkspaceEntry[] } }>("/list", { params: { directory: getDirectory(), path }, signal });
-    return data.data;
+    // 三个入口（文件树 / 快速打开 / 全文搜索）都从这里取目录内容，故在源头收口一次。
+    const entries = data.data.entries.filter(entry => !isInternalEntry(entry.name));
+    return { ...data.data, entries, empty: entries.length === 0 };
   }
 
   async function read(path: string) {
