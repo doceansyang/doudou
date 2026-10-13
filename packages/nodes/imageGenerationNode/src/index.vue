@@ -11,7 +11,6 @@
     :style="{ width: `${(previewUrl && imageWidth ? imageWidth : PREVIEW_WIDTH_16_9) + 18}px` }">
     <template v-if="editor?.mode" #top><div ref="paintToolbar" /></template>
     <template #topActions>
-      <el-button :icon="IconWand" :disabled="generating || deleting || uploading || editor?.mode === 'inpaint' || !refList.length || !data.prompt.trim()" text title="匹配元素" aria-label="匹配元素" @click.stop="matchElements">匹配元素</el-button>
       <el-button :icon="IconBrush" :disabled="generating || deleting || uploading || !previewUrl || gridSplit?.splitting" text title="局部重绘" aria-label="局部重绘" @click.stop="editor?.start('inpaint')">局部重绘</el-button>
       <el-button :icon="IconLayoutGrid" :disabled="generating || deleting || uploading || !previewUrl" :loading="gridSplit?.splitting" text title="宫格切分" aria-label="宫格切分" @click.stop="gridSplit?.open($event)">宫格切分</el-button>
       <mediaHistory mediaType="image" :current="outputFile" :disabled="generating || deleting || uploading" @select="outputs.image = { dataType: 'IMAGE', value: $event }" />
@@ -44,11 +43,14 @@
     </div>
     <template v-if="editor?.mode !== 'mark'" #bottom>
       <el-card class="promptCard" shadow="never" :bodyStyle="{ padding: '14px 16px 12px' }">
-        <referenceItem
-          v-if="refList.length"
-          v-model="refList"
-          @preview="setReferencePreview"
-          @remove="removeReference" />
+        <div class="referenceRow">
+          <referenceItem
+            v-if="refList.length"
+            v-model="refList"
+            @preview="setReferencePreview"
+            @remove="removeReference" />
+          <el-button class="matchButton" :icon="IconWand" :disabled="generating || deleting || uploading || editor?.mode === 'inpaint' || !refList.length || !data.prompt.trim()" title="匹配元素" aria-label="匹配元素" @click.stop="matchElements">匹配元素</el-button>
+        </div>
         <promptInput v-if="editor?.mode === 'inpaint'" v-model="data.inpaintPromptModel" v-model:text="data.inpaintPrompt" :references="referenceMentions" expandable />
         <promptInput v-else v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" expandable />
         <div class="promptFooter">
@@ -431,6 +433,30 @@ nodeTools.register({
 }
 
 .promptCard {
+  .referenceRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* 匹配元素：紫色实心。和发送键一样用 CSS 变量覆盖，避免深色主题全局按钮
+     hover 特异性（0,8,1）把组件内样式顶掉。 */
+  .matchButton {
+    flex-shrink: 0;
+    margin-left: auto;
+    --el-button-bg-color: #7c5cf0;
+    --el-button-border-color: transparent;
+    --el-button-text-color: #fff;
+    --el-button-hover-bg-color: #8f74f3;
+    --el-button-hover-border-color: transparent;
+    --el-button-hover-text-color: #fff;
+    --el-button-active-bg-color: #6d4ce8;
+    --el-button-active-border-color: transparent;
+    --el-button-disabled-bg-color: var(--el-fill-color-light);
+    --el-button-disabled-text-color: var(--el-text-color-placeholder);
+    --el-button-disabled-border-color: transparent;
+  }
+
   .promptFooter {
     display: flex;
     align-items: center;

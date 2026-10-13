@@ -10,7 +10,6 @@
     :bottomWidth="660"
     :style="{ width: `${(previewUrl && videoWidth ? videoWidth : PREVIEW_WIDTH_16_9) + 18}px` }">
     <template #topActions>
-      <el-button :icon="IconWand" :disabled="generating || deleting || uploading || !refList.length || !data.prompt.trim()" text title="匹配元素" aria-label="匹配元素" @click.stop="matchElements">匹配元素</el-button>
       <el-button :icon="IconMusic" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('extractAudio')">提取音轨</el-button>
       <el-button :icon="IconLayersSubtract" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('separate')">分离音视频</el-button>
       <el-button :icon="IconScissors" text :disabled="!outputFile || generating || deleting || uploading || actions?.processing" @click.stop="actions?.open('trim')">截取片段</el-button>
@@ -46,11 +45,14 @@
     </div>
     <template #bottom>
       <el-card class="promptCard" shadow="never" :bodyStyle="{ padding: '14px 16px 12px' }">
-        <referenceItem
-          v-if="refList.length"
-          v-model="refList"
-          @preview="setReferencePreview"
-          @remove="removeReference" />
+        <div class="referenceRow">
+          <referenceItem
+            v-if="refList.length"
+            v-model="refList"
+            @preview="setReferencePreview"
+            @remove="removeReference" />
+          <el-button class="matchButton" :icon="IconWand" :disabled="generating || deleting || uploading || !refList.length || !data.prompt.trim()" title="匹配元素" aria-label="匹配元素" @click.stop="matchElements">匹配元素</el-button>
+        </div>
         <div v-if="frameMode" class="referenceHint">
           {{ selectedMode === "startFrameOptional" ? "仅一张图片时作为尾帧；两张图片按顺序作为首帧、尾帧" : "图片引用按顺序作为首帧、尾帧" }}
         </div>
@@ -484,6 +486,30 @@ nodeTools.register({
 }
 
 .promptCard {
+  .referenceRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* 匹配元素：紫色实心。和发送键一样用 CSS 变量覆盖，避免深色主题全局按钮
+     hover 特异性（0,8,1）把组件内样式顶掉。 */
+  .matchButton {
+    flex-shrink: 0;
+    margin-left: auto;
+    --el-button-bg-color: #7c5cf0;
+    --el-button-border-color: transparent;
+    --el-button-text-color: #fff;
+    --el-button-hover-bg-color: #8f74f3;
+    --el-button-hover-border-color: transparent;
+    --el-button-hover-text-color: #fff;
+    --el-button-active-bg-color: #6d4ce8;
+    --el-button-active-border-color: transparent;
+    --el-button-disabled-bg-color: var(--el-fill-color-light);
+    --el-button-disabled-text-color: var(--el-text-color-placeholder);
+    --el-button-disabled-border-color: transparent;
+  }
+
   .referenceHint {
     margin: 8px 0;
     color: var(--el-text-color-secondary);
