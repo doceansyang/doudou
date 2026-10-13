@@ -1618,16 +1618,50 @@ const generateVideo: GenerateMedia<any> = async function (request: VideoRequest)
     log(`成片已保存：${outputPath}（${(videoBytes.length / 1048576).toFixed(1)} MB）｜来源 ${sourceHost}`);
 
     // ── 去水印（链路里的一道自动工序）──────────────────────────────────
-    // 豆包「AI生成」是**半透明白字**，会在画面**左上/右下之间来回跳**；而平台**不给
-    // 无水印版**（get_play_info 的 media_info 与 original_media_info 是同一 URL，
-    // 删/改 lr 参数下载 SHA 完全相同 —— 实测过，"换原片"那条路是死的）。
-    // 所以这里做像素修复：有 Python+OpenCV 走 inpaint（效果最自然），否则 ffmpeg delogo 兜底。
-    // 任何一步失败都保留原始成片，绝不让去水印把出片搞失败。
-    const deshadow = await deshadowVideo(outputPath, log);
-    if (deshadow.applied) {
-      log(`去水印完成（${deshadow.method}）：${deshadow.detail}`);
+    // 两级策略，**优先无损**：
+    //  ① **平台原片（fplay）**：地址嵌在会话消息 JSON 里，靠生成过程中扫响应体截获。
+    //     取 `logo_type` 为空的档 → AES 解密 → 地址不含 watermark。实测这条路的成品
+    //     **完全没有水印**（左上、右下都干净），而且是无损原编码 ⇒ **首选**。
+    //     ⚠️ 别再拿 get_play_info 的 original_media_info 当原片 —— 实测它与抓取版
+    //     逐像素相同（同一个带水印文件），那条路是死的。
+    //  ② 拿不到 fplay（没截获到 / 解密失败）→ 退回**像素修复**（deshadowVideo：
+    //     有 OpenCV 走 inpaint，否则 ffmpeg delogo），有损但不至于把成片卡住。
+    let handled = false;
+    if (accountType === "doubao" && fplayApis.size) {
+      const original = await resolveOriginalViaFplay(context, [...fplayApis]).catch(() => null);
+      if (original) {
+        try {
+          const response = await context.request.get(original.url, { timeout: 120000 });
+          const body = await response.body();
+          if (response.ok() && body && body.length > 50_000) {
+            const archived = outputPath.replace(/\.mp4$/, ".抓取版.mp4");
+            await writeFile(archived, videoBytes);
+            await writeFile(outputPath, body);
+            videoBytes = new Uint8Array(body);
+            handled = true;
+            log(
+              `已换用平台原片（${original.definition} ${original.label}，${(body.length / 1048576).toFixed(1)} MB）` +
+                `｜无水印，抓取版存档 ${archived}`,
+            );
+          } else {
+            log(`原片下载不完整（HTTP ${response.status?.() ?? "?"}），转像素修复`);
+          }
+        } catch (error) {
+          log(`原片下载失败，转像素修复：${String(error).slice(0, 120)}`);
+        }
+      } else {
+        log(`未能从 fplay 解析出原片（截获 ${fplayApis.size} 条），转像素修复`);
+      }
     } else {
-      log(`水印未处理，保留原始成片：${deshadow.detail}`);
+      log(`未截获 fplay 地址（${fplayApis.size} 条），转像素修复`);
+    }
+    if (!handled) {
+      const deshadow = await deshadowVideo(outputPath, log);
+      if (deshadow.applied) {
+        log(`像素去水印完成（${deshadow.method}）：${deshadow.detail}`);
+      } else {
+        log(`水印未处理，保留原始成片：${deshadow.detail}`);
+      }
     }
 
     return [
