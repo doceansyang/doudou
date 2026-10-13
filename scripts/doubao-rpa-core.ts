@@ -314,6 +314,14 @@ export type BrowserCandidate = {
    */
   running: boolean;
   /**
+   * 这个浏览器当前有几个进程（**只用来解释给用户听**，不用作判据）。
+   *
+   * 用户最常见的困惑是「我 Edge 明明关了啊」—— 其实是窗口关了、进程还常驻
+   * （Edge 默认开着「启动增强 / 关闭后继续运行后台扩展」，实测关掉窗口后仍留 11 个）。
+   * 把这个数字摆出来，"关不掉"就变成看得见的事了。
+   */
+  processCount: number;
+  /**
    * 这个浏览器的 cookie 库里有没有 doubao 的记录。
    *
    * ⚠️ 只查 `host_key` 这种**明文**列（grep 原始文件字节），**绝不解密任何 cookie 值** ——
@@ -420,6 +428,77 @@ function cookiesMentionDoubao(profileDir: string): boolean | null {
   return false;
 }
 
+/** 数这个镜像名有几个进程（仅供界面解释，**不参与"能否同步"的判断**）。 */
+function countProcess(proc: string): number {
+  try {
+    if (process.platform !== "win32") {
+      const out = spawnSync("pgrep", ["-f", proc], { encoding: "utf8", windowsHide: true });
+      return String(out.stdout ?? "").trim().split("\n").filter(Boolean).length;
+    }
+    const out = spawnSync("tasklist", ["/FI", `IMAGENAME eq ${proc}`, "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true });
+    const needle = `"${proc.toLowerCase()}"`;
+    return String(out.stdout ?? "")
+      .split(/\r?\n/)
+      .filter((line) => line.toLowerCase().includes(needle)).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** 取某个浏览器当前的 profile 目录（多用户配置时优先 Default）。 */
+function profileDirOf(item: { userData: string[] }): string {
+  const userDataDir = item.userData.find((path): path is string => Boolean(path) && existsSync(path));
+  if (!userDataDir) return "";
+  let profileDirectory = "Default";
+  if (!existsSync(join(userDataDir, profileDirectory))) {
+    const sibling = readdirSync(userDataDir).find((name) => /^Profile \d+$/.test(name));
+    if (sibling) profileDirectory = sibling;
+  }
+  return join(userDataDir, profileDirectory);
+}
+
+/**
+ * 彻底退出某个浏览器 —— 只在用户点「退出并同步」时调用。
+ *
+ * 为什么必须真退干净（而不是"边跑边读"）：我们的读取方式是拿**它自己的
+ * user-data-dir** 无头启动一次、让浏览器自己把 Cookie 写进网络日志。而 Chromium 的
+ * user-data-dir 是**单实例**的：已有进程在用时新进程拿不到这个 profile；
+ * 同时 Cookies 库是被**独占**打开的（实测连"只读 + 允许共享"都被拒），
+ * 加上 ABE 加密与复制 profile 的路径校验 ⇒ 运行中没有任何合法通路能读到它。
+ */
+export async function closeBrowser(id: string): Promise<{ ok: boolean; killed: number; freed: boolean; error?: string }> {
+  const item = browserRecipe().find((entry) => entry.id === id);
+  if (!item) return { ok: false, killed: 0, freed: false, error: "未知的浏览器" };
+  const profileDir = profileDirOf(item);
+  if (!profileDir) return { ok: false, killed: 0, freed: false, error: "找不到该浏览器的用户数据目录" };
+  const killed = countProcess(item.proc);
+  try {
+    if (process.platform === "win32") {
+      // /T 连子进程一起收；/F 不弹确认。⚠️ 目标只限这一种镜像名，
+      // 不会碰本软件自己的 WebView2（那个叫 msedgewebview2.exe）。
+      spawnSync("taskkill", ["/IM", item.proc, "/T", "/F"], { windowsHide: true });
+    } else {
+      spawnSync("pkill", ["-f", item.proc], { windowsHide: true });
+    }
+  } catch {
+    // 杀不动也没关系 —— 下面用"profile 到底放开了没"作为唯一判据。
+  }
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (!isProfileLocked(profileDir)) {
+      log(`${item.name} 已退出（原有 ${killed} 个进程），登录数据已释放`);
+      return { ok: true, killed, freed: true };
+    }
+    await wait(600);
+  }
+  return {
+    ok: true,
+    killed,
+    freed: false,
+    error: `已经退出了 ${item.name} 的进程，但它的登录数据仍被占用（可能有别的程序正在用这个用户目录）`,
+  };
+}
+
 /** 扫描本机装着的 Chromium 浏览器（给引导页的"选浏览器"用）。 */
 export function listBrowserCandidates(): BrowserCandidate[] {
   const out: BrowserCandidate[] = [];
@@ -443,6 +522,7 @@ export function listBrowserCandidates(): BrowserCandidate[] {
       userDataDir,
       profileDirectory,
       running,
+      processCount: countProcess(item.proc),
       hasDoubao: running ? null : cookiesMentionDoubao(profileDir),
     });
   }

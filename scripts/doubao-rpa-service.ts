@@ -38,6 +38,8 @@
  *   GET    /browsers            本机装着的浏览器（含"是否正在运行""是否登录过豆包"）
  *   POST   /browsers/sync       从指定浏览器读已登录的豆包账号  body { id }
  *        ⚠️ 该浏览器必须已退出；无头启动一次读 NetLog 里的 Cookie，读完即删日志
+ *   POST   /browsers/close      彻底退出指定浏览器（含后台常驻进程） body { id }
+ *        关窗口往往不够：Edge 默认开着「启动增强 / 后台扩展」，会留一堆进程占着登录数据
  *   POST   /accounts/:id/login  重新扫码登录
  *   DELETE /accounts/:id        删除账号
  *   POST   /generate            生成视频（自动选号，返回 base64）
@@ -749,6 +751,15 @@ async function route(request: Request): Promise<Response> {
     if (pathname === "/browsers/sync" && request.method === "POST") {
       const body = await request.json().catch(() => ({}));
       return Response.json(await syncFromBrowser(String(body?.id ?? "")));
+    }
+
+    // 用户点「退出并同步」：先把这个浏览器真退干净（含后台常驻进程），再让调用方去同步。
+    if (pathname === "/browsers/close" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const core = await loadCore();
+      const result = await core.closeBrowser(String(body?.id ?? ""));
+      await log(`退出浏览器 ${body?.id}：原有 ${result.killed} 个进程，释放登录数据=${result.freed}${result.error ? `（${result.error}）` : ""}`);
+      return Response.json(result);
     }
 
     // 扫码登录 / 生成跑在哪个浏览器内核里（换内核会让已有登录态失效，界面上要警示）。

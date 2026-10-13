@@ -105,12 +105,14 @@
       </p>
       <p class="pickerHint">
         选一个浏览器，读它里面<b>已登录的豆包账号</b>（只读，账号只保存在本机）。<br />
-        该浏览器<b>需要先完全退出</b>——它运行时登录数据被占用，读不到。
+        它必须先<b>完全退出</b>：运行中登录数据是被独占的，读不到。⚠️ <b>只关窗口往往不够</b>
+        ——Edge 默认开着「启动增强 / 关闭后继续运行后台扩展」，会留一堆进程常驻；
+        遇到这种情况直接点右边那颗「退出并同步」。
       </p>
 
       <div v-if="browserLoading" class="pickerState">正在扫描本机浏览器…</div>
       <ul v-else-if="browsers.length" class="pickerList">
-        <li v-for="item in browsers" :key="item.id">
+        <li v-for="item in browsers" :key="item.id" class="pickerRow">
           <button
             type="button"
             class="pickerItem"
@@ -119,11 +121,24 @@
             :aria-pressed="pickedBrowser === item.id"
             @click="pickedBrowser = item.id">
             <span class="pickerName">{{ item.name }}</span>
-            <el-tag v-if="item.running" size="small" type="warning">正在运行，请先退出</el-tag>
+            <el-tag v-if="item.running" size="small" type="warning">
+              正在运行{{ item.processCount ? `（${item.processCount} 个进程）` : "" }}
+            </el-tag>
             <el-tag v-else-if="item.hasDoubao === true" size="small" type="success">登录过豆包</el-tag>
             <el-tag v-else-if="item.hasDoubao === false" size="small" type="info">未检测到豆包</el-tag>
             <el-tag v-else size="small" type="info">读不到（可能被占用）</el-tag>
           </button>
+          <!-- 运行中 ⇒ 给一条能走通的路，而不是让用户卡在"请先退出"上 -->
+          <el-button
+            v-if="item.running"
+            class="pickerKill"
+            size="small"
+            round
+            :loading="closingId === item.id"
+            :disabled="browserBusy || Boolean(closingId)"
+            @click="closeAndSync(item)">
+            退出并同步
+          </el-button>
         </li>
       </ul>
       <div v-else class="pickerState">没有扫描到可用的浏览器。</div>
@@ -222,11 +237,13 @@ function pickAllUsable(accounts: LocalAccount[]): LocalAccount[] {
 /* ------------------------------------------------ 选择「哪个浏览器」来同步 */
 
 /** 本机扫到的浏览器（`GET /browsers`）。hasDoubao=null 表示读不到（浏览器在跑）。 */
-type BrowserItem = { id: string; name: string; running: boolean; hasDoubao: boolean | null };
+type BrowserItem = { id: string; name: string; running: boolean; hasDoubao: boolean | null; processCount?: number };
 
 const browserPickerVisible = ref(false);
 const browserLoading = ref(false);
 const browserBusy = ref(false);
+/** 正在「退出并同步」哪一个（只给那一行转圈，不锁整个弹窗）。 */
+const closingId = ref("");
 const browserError = ref("");
 const browsers = ref<BrowserItem[]>([]);
 const pickedBrowser = ref("");
@@ -316,6 +333,43 @@ async function syncPickedBrowser() {
   } finally {
     browserBusy.value = false;
   }
+}
+
+/**
+ * 「退出并同步」——用户点了这个浏览器的行内按钮时：
+ *   1) 先让后端把它**真退干净**（含「启动增强」留下的后台常驻进程）；
+ *   2) 等它把登录数据放开（后端会轮询确认，最多 15s）；
+ *   3) 直接开始同步 —— 按钮语义就是一步到位，不再让用户自己再点一次。
+ *
+ * ⚠️ 会关掉这个浏览器**所有窗口/标签页**（它开着的话）。Edge 一般能"恢复上次会话"，
+ * 所以先在界面上把这句话说清楚，再让用户点。
+ */
+async function closeAndSync(item: BrowserItem) {
+  if (browserBusy.value || closingId.value) return;
+  closingId.value = item.id;
+  browserError.value = "";
+  try {
+    const response = await axios.post<{ ok?: boolean; freed?: boolean; killed?: number; error?: string }>(
+      `${RPA_URL}/browsers/close`,
+      { id: item.id },
+      { timeout: 60000 },
+    );
+    if (!response.data?.ok) throw new Error(response.data?.error || "没能退出该浏览器");
+    if (!response.data?.freed) throw new Error(response.data?.error || "已尝试退出，但登录数据仍被占用，请手动彻底退出它");
+  } catch (error) {
+    browserError.value = axios.isAxiosError(error)
+      ? (error.response?.data as { error?: string })?.error || error.message
+      : error instanceof Error
+      ? error.message
+      : "退出失败";
+    void loadBrowsers();
+    return;
+  } finally {
+    closingId.value = "";
+  }
+  await loadBrowsers();
+  pickedBrowser.value = item.id;
+  await syncPickedBrowser();
 }
 
 /** 不用浏览器同步，改用我们自己的登录窗口扫码。 */
@@ -982,6 +1036,35 @@ html.dark .pickerPrimaryButton {
   li + li {
     margin-top: 6px;
   }
+}
+
+.pickerRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  /* 有「退出并同步」按钮时，让浏览器那一格吃掉剩余宽度 ——
+     否则它会被按钮挤窄、名字折成两行，跟上面没按钮的那行宽度也对不齐。 */
+  .pickerItem {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+}
+
+.pickerKill {
+  flex-shrink: 0;
+  height: auto;
+  min-height: 32px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* 深色下主色近黑 ⇒ 选中态的「主色边框 + 主色浅调底」也≈近黑，看不出选中了哪一行。
+   同因同解：中性底 + 可读前景色做边框。 */
+html.dark .pickerItem.selected {
+  border-color: var(--ui-brand-foreground, var(--el-color-primary));
+  background: var(--el-fill-color-light);
 }
 
 .pickerItem {
