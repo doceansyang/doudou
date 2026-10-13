@@ -185,6 +185,52 @@ function startSelectionConnection() {
   menu.value?.handleClose();
 }
 
+/**
+ * 把正在拖的连线**吸附**到落点所在的那个节点上 —— 用户不必精确命中端口那个小圆点。
+ *
+ * 为什么需要补这一手：Vue Flow 判定落点，只认 `document.elementFromPoint()` 命中的元素
+ * **本身**是不是 `.vue-flow__handle`；拖到节点身上（哪怕就压在端口旁边几像素）它都会认为
+ * "没连上"，然后把这条线丢掉。这里在松手时补一次"按节点吸附"，手感才符合直觉。
+ *
+ * 端口挑选：**同类型兼容的端口优先**，再退到"任意能通过校验"的端口（例如两个都是宽松端口）。
+ * 校验复用画布工具那一套 `validateConnection`，所以方向、数据类型、去重规则与菜单建边完全一致。
+ */
+function snapConnectionToNode(free: GraphNode, handle: ConnectingHandle): boolean {
+  const fixed = flow.findNode(handle.nodeId);
+  if (!fixed || handle.id == null || fixed.id === free.id) return false;
+  if (!flow.nodesConnectable.value || fixed.connectable === false || free.connectable === false) return false;
+  const wantType: HandleType = handle.type === "source" ? "target" : "source";
+  const freeHandles = ((free.data.handles as NodeHandle[] | undefined) ?? []).filter(item => item.type === wantType);
+  if (!freeHandles.length) return false;
+  const fixedHandle = ((fixed.data.handles as NodeHandle[] | undefined) ?? []).find(item => item.id === handle.id);
+  const fromSource = handle.type === "source";
+  // ACT: 接线方向可能正反两种（从输出端拖到节点，或从输入端拖到节点），这里统一成 Connection。
+  const connectionOf = (freeHandle: NodeHandle) => ({
+    source: fromSource ? fixed.id : free.id,
+    sourceHandle: fromSource ? handle.id! : freeHandle.id,
+    target: fromSource ? free.id : fixed.id,
+    targetHandle: fromSource ? freeHandle.id : handle.id!,
+  });
+  const compatible = (freeHandle: NodeHandle) => !fixedHandle
+    || (fromSource
+      ? isTypeCompatible(fixedHandle.dataType, freeHandle.dataType)
+      : isTypeCompatible(freeHandle.dataType, fixedHandle.dataType));
+  const ordered = [...freeHandles.filter(compatible), ...freeHandles.filter(item => !compatible(item))];
+  const sourceNode = fromSource ? fixed : free;
+  const targetNode = fromSource ? free : fixed;
+  for (const freeHandle of ordered) {
+    const connection = connectionOf(freeHandle);
+    const edges = flow.getEdges.value;
+    // 已经有同样的连线就直接收工，别叠一条重复的。
+    if (edges.some(edge => edge.source === connection.source && edge.target === connection.target
+      && edge.sourceHandle === connection.sourceHandle && edge.targetHandle === connection.targetHandle)) return false;
+    if (!validateConnection(connection, { sourceNode, targetNode, nodes: flow.getNodes.value, edges })) continue;
+    flow.addEdges([{ id: crypto.randomUUID(), ...connection }]);
+    return true;
+  }
+  return false;
+}
+
 onBeforeUnmount(clearConnection);
 flow.onConnectStart(() => {
   pendingHandle.value = undefined;
@@ -200,7 +246,18 @@ flow.onConnectEnd((event) => {
   const point = "changedTouches" in event ? event.changedTouches[0] : event;
   if (!point) return;
   const target = document.elementFromPoint(point.clientX, point.clientY);
-  if (!target?.classList.contains("vue-flow__pane") || !flow.vueFlowRef.value?.contains(target)) return;
+  if (!target || !flow.vueFlowRef.value?.contains(target)) return;
+  // ★ 落在**节点身上**（不必精确命中端口）→ 直接吸附到该节点最合适的端口。
+  const droppedOn = target.closest(".vue-flow__node") as HTMLElement | null;
+  if (droppedOn) {
+    const free = flow.findNode(droppedOn.getAttribute("data-id") ?? "");
+    if (free && free.id !== node.id && free.connectable !== false && flow.nodesConnectable.value) {
+      if (!snapConnectionToNode(free, handle)) ElMessage.warning("该节点没有兼容的端口可连接");
+    }
+    // 落在自己身上、或节点不可连接：静默收工（不要弹菜单，免得打断）
+    return;
+  }
+  if (!target.classList.contains("vue-flow__pane")) return;
   void openMenu(event, true, [], { node, id: handle.id, type: handle.type, start: { ...handle } });
 });
 
