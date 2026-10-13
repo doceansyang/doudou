@@ -49,7 +49,22 @@
             v-model="refList"
             @preview="setReferencePreview"
             @remove="removeReference" />
-          <el-button class="matchButton" :icon="IconWand" :disabled="generating || deleting || uploading || editor?.mode === 'inpaint' || !refList.length || !data.prompt.trim()" title="匹配元素" aria-label="匹配元素" @click.stop="matchElements">匹配元素</el-button>
+          <el-button
+            v-if="matchUndo"
+            class="matchButton undoButton"
+            :icon="IconArrowBackUp"
+            :disabled="generating || deleting || uploading"
+            title="撤销匹配，回到匹配之前"
+            aria-label="撤销匹配"
+            @click.stop="undoMatch">撤销匹配</el-button>
+          <el-button
+            v-else
+            class="matchButton"
+            :icon="IconWand"
+            :disabled="generating || deleting || uploading || editor?.mode === 'inpaint' || !refList.length || !data.prompt.trim()"
+            title="匹配元素"
+            aria-label="匹配元素"
+            @click.stop="matchElements">匹配元素</el-button>
         </div>
         <promptInput v-if="editor?.mode === 'inpaint'" v-model="data.inpaintPromptModel" v-model:text="data.inpaintPrompt" :references="referenceMentions" expandable />
         <promptInput v-else v-model="data.promptModel" v-model:text="data.prompt" :references="referenceMentions" expandable />
@@ -102,7 +117,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from "vue";
 import { ElButton, ElCard, ElSelect, ElOption, ElOptionGroup, ElLoading, ElImageViewer, ElMessage } from "element-plus";
-import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconLayoutGrid, IconBrush, IconPencil, IconWand } from "@tabler/icons-vue";
+import { IconPhotoAi, IconSparkles, IconArrowUp, IconPlayerStop, IconTransfer, IconLayoutGrid, IconBrush, IconPencil, IconWand, IconArrowBackUp } from "@tabler/icons-vue";
 import { applyReferenceTags, groupNodeModels, matchReferenceMentions, nodeSkeleton, nodeTools, PREVIEW_WIDTH_16_9, previewWidth, showNodeError, useNode, useNodeGeneration, useNodeReferences, z, type NodeMediaModel, type NodeHandle } from "@toonflow/nodes-scaffold/runtime";
 import promptInput from "@toonflow/nodes-scaffold/promptInput";
 import referenceItem from "@toonflow/nodes-scaffold/referenceItem";
@@ -239,16 +254,40 @@ function loadModels() {
   return modelsRequest;
 }
 
+/**
+ * 「匹配元素」的撤销快照 —— 用户口径：匹配之后要能退回匹配之前。
+ * 存的是匹配**前**那份提示词（文本 + 富文本模型），撤销时原样还原，不重排、不丢标签。
+ */
+const matchUndo = ref<{ prompt: string; model: PromptModel; matched: string } | null>(null);
+
+// 用户匹配完又自己改了提示词 ⇒ 撤销快照作废，免得「撤销」把他刚写的内容一起吞掉。
+// （equal 时不作废：匹配动作自己也会改 prompt，那时值正好等于 matched。）
+watch(() => data.value.prompt, (value) => {
+  if (matchUndo.value && value !== matchUndo.value.matched) matchUndo.value = null;
+});
+
 function matchElements() {
   const result = matchReferenceMentions(data.value.prompt, referenceMentions.value);
   if (!result.matched) {
     ElMessage.warning(result.unmatched.length ? `未匹配到上游素材：${result.unmatched.join("、")}` : "提示词里没有需要匹配的 @");
     return;
   }
+  const before = { prompt: data.value.prompt, model: data.value.promptModel, matched: result.text };
   data.value.prompt = result.text;
   data.value.promptModel = result.text.split("\n").map((text) => [{ type: "Write", text }]);
+  matchUndo.value = before;
   if (result.unmatched.length) ElMessage.warning(`已匹配 ${result.matched} 个，未匹配：${result.unmatched.join("、")}`);
   else ElMessage.success(`已匹配 ${result.matched} 个参考`);
+}
+
+/** 撤销上一次「匹配元素」：把提示词整段还原成匹配之前的样子。 */
+function undoMatch() {
+  const before = matchUndo.value;
+  if (!before) return;
+  matchUndo.value = null; // 先清快照，免得下面的赋值触发"已编辑就作废"的那条 watch
+  data.value.prompt = before.prompt;
+  data.value.promptModel = before.model;
+  ElMessage.success("已撤销匹配，提示词回到匹配之前");
 }
 
 async function startGeneration(inpaint = false) {
@@ -455,6 +494,20 @@ nodeTools.register({
     --el-button-disabled-bg-color: var(--el-fill-color-light);
     --el-button-disabled-text-color: var(--el-text-color-placeholder);
     --el-button-disabled-border-color: transparent;
+  }
+
+  /* 「撤销匹配」与「匹配元素」同位置切换出现：次要动作，样式做弱化，
+     但不能"看不见"——深色主题下主色近黑，所以走中性底 + 常规描边。 */
+  .undoButton {
+    --el-button-bg-color: var(--el-fill-color);
+    --el-button-border-color: var(--el-border-color);
+    --el-button-text-color: var(--el-text-color-primary);
+    --el-button-hover-bg-color: var(--el-fill-color-dark);
+    --el-button-hover-border-color: var(--el-border-color);
+    --el-button-hover-text-color: var(--el-text-color-primary);
+    --el-button-active-bg-color: var(--el-fill-color-dark);
+    --el-button-active-border-color: var(--el-border-color);
+    --el-button-active-text-color: var(--el-text-color-primary);
   }
 
   .promptFooter {

@@ -18,7 +18,7 @@ import { IconMaximize } from "@tabler/icons-vue";
 import xSender, { type AnyTagProps, type MentionItem } from "x-sender";
 import "x-sender/lib/XSender.css";
 
-const props = defineProps<{ references: (MentionItem & { value: string })[]; expandable?: boolean; placeholder?: string }>();
+const props = defineProps<{ references: (MentionItem & { value: string; dataType?: string })[]; expandable?: boolean; placeholder?: string }>();
 const model = defineModel<AnyTagProps[][]>({ required: true });
 const text = defineModel<string>("text", { default: "" });
 const senderElement = ref<HTMLElement>();
@@ -34,6 +34,9 @@ function previewReference(event: MouseEvent) {
   const tag = event.target instanceof Element ? event.target.closest<HTMLElement>(".imageReference[data-reference-id]") : null;
   const reference = props.references.find(item => item.id === tag?.dataset.referenceId);
   if (!reference?.avatar) return;
+  // 音频参考的 avatar 只是个"音符"占位图标（见 useNodeReferences 的 AUDIO_ICON），
+  // 拿它开图片查看器毫无意义 ⇒ 跳过。
+  if (reference.dataType === "AUDIO") return;
   event.preventDefault();
   event.stopPropagation();
   sender?.bus.emit(xSender.EventSet.EVENT_COMMON_DIALOG_CLOSE);
