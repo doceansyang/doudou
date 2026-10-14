@@ -1,320 +1,215 @@
 <template>
   <div class="bgArt" aria-hidden="true">
-    <canvas ref="filmCanvas" />
+    <div class="film">
+      <!-- 影片本体：**直接播原片**（原生播放管线，GPU 解码/合成，JS 零逐帧工作）。
+           老胶片的感觉全部由下面这几层 CSS 覆盖层提供。 -->
+      <video ref="filmVideo" class="filmVideo" :src="filmUrl" muted loop playsinline autoplay preload="auto" />
+      <span class="rail railLeft" />
+      <span class="rail railRight" />
+      <span class="leak" />
+      <span class="scratch" />
+      <span class="scratch scratchAlt" />
+      <span class="vignette" />
+      <span class="grain" :style="{ backgroundImage: `url(${grainUrl})` }" />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
-import filmUrl from "@/assets/image.png";
+import { onBeforeUnmount, onMounted, ref } from "vue";
+import filmUrl from "@/assets/silent-film.mp4";
+import grainUrl from "@/assets/film-grain.png";
 
-const filmCanvas = ref<HTMLCanvasElement>();
-let isReady = false;
-const frameDuration = 80;
-let image: HTMLImageElement;
-let context: CanvasRenderingContext2D | null = null;
-let resizeObserver: ResizeObserver;
-let reducedMotion: MediaQueryList;
-let pauseTimer: ReturnType<typeof setTimeout> | undefined;
-let animationId = 0;
-let lastFrameTime = 0;
-let frameIndex = 0;
-let width = 0;
-let height = 0;
-let pixelRatio = 1;
-let exposure = 1;
-let jitterX = 0;
-let jitterY = 0;
-let jitterAngle = 0;
-let frameTick = 0;
-let grainIndex = 0;
-let grainOffset = 0;
-const grains: CanvasPattern[] = [];
-const gateWear = Array.from({ length: 64 }, () => Math.random() * 1.8);
-let scratches: { x: number; top: number; bottom: number; life: number; light: boolean }[] = [];
-let dust: { x: number; y: number; size: number; fiber: boolean }[] = [];
-let splice: { y: number; life: number } | null = null;
+/**
+ * 首屏右侧的「老胶片」动画。
+ *
+ * ⚠️ 这里刻意**不**用 canvas 逐帧重绘：
+ *    · 早先用 canvas 画（先 16 张精灵图、后改成 drawImage(video)）时，每帧都要在
+ *      主线程上做 drawImage + 齿孔 + 颗粒 soft-light 合成，低配机（Pentium Gold + 集显）
+ *      上表现为「卡」「播放不流畅」；把帧率降到 15fps 能救回来，但画面又开始跳。
+ *    · 现在的做法是用户点出来的正解：**视频交给 <video> 原生播**（硬件解码 + 合成器，
+ *      主线程零负担、帧率就是原片的 30fps），胶片质感（片轨齿孔、颗粒、划痕、
+ *      暗角、灯光泄漏、轻微跳帧抖动）用 CSS 覆盖层做 —— 全是 transform/opacity，
+ *      走合成器线程，几乎不占 CPU。
+ *    要再加胶片味，就往这一叠 span 上叠，别再回到 canvas 每帧重绘的老路。
+ */
+const filmVideo = ref<HTMLVideoElement>();
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
-function getSourceRect(index: number) {
-  const column = index % 4;
-  const row = Math.floor(index / 4);
-  // 原图各行的地面分隔带不等高，按实际边界避开帧号和相邻画格。
-  const rowBounds = [[1, 126], [135, 262], [270, 391], [405, 528]][row]!;
-  const scaleY = image.naturalHeight / 538;
-  const cellWidth = image.naturalWidth / 4;
-  return [column * cellWidth + 1, rowBounds[0]! * scaleY, cellWidth - 2, (rowBounds[1]! - rowBounds[0]!) * scaleY] as const;
-}
-
-function ageFilm() {
-  frameTick++;
-  exposure = 0.96 + Math.random() * 0.04;
-  jitterX = (Math.random() - 0.5) * 2;
-  jitterY = (Math.random() - 0.5) * 2.6;
-  jitterAngle = (Math.random() - 0.5) * 0.007;
-  grainIndex = Math.floor(Math.random() * grains.length);
-  grainOffset = Math.floor(Math.random() * 192);
-  scratches = scratches.filter((scratch) => --scratch.life > 0);
-  for (const scratch of scratches) scratch.x += (Math.random() - 0.5) * 0.001;
-  if (scratches.length < 3 && Math.random() < 0.28) {
-    scratches.push({
-      x: 0.05 + Math.random() * 0.9,
-      top: Math.random() * 0.15,
-      bottom: 0.7 + Math.random() * 0.3,
-      life: 4 + Math.floor(Math.random() * 14),
-      light: Math.random() > 0.4,
-    });
-  }
-  if (splice && --splice.life <= 0) splice = null;
-  else if (!splice && Math.random() < 0.015) splice = { y: 0.15 + Math.random() * 0.7, life: 3 + Math.floor(Math.random() * 4) };
-  dust = Array.from({ length: 6 + Math.floor(Math.random() * 10) }, () => ({
-    x: Math.random(), y: Math.random(), size: 0.4 + Math.random() * 1.5, fiber: Math.random() < 0.12,
-  }));
-}
-
-function draw() {
-  if (!context || !image?.naturalWidth || !width || !height) return;
-  const ctx = context;
-  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-
-  const [sx, sy, sw, sh] = getSourceRect(frameIndex);
-  const filmWidth = Math.min(width * 0.94, height * 0.8 * (181 / 125));
-  const filmHeight = filmWidth * (125 / 181);
-  const x = (width - filmWidth) / 2;
-  const y = (height - filmHeight) / 2;
-  const railWidth = filmWidth * 0.06;
-  const pictureX = railWidth;
-  const pictureWidth = filmWidth - railWidth * 2;
-  const scale = Math.min(pictureWidth / sw, filmHeight / sh);
-
-  const glow = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, Math.max(width, height) * 0.62);
-  glow.addColorStop(0, "#77766f");
-  glow.addColorStop(0.55, "#242525");
-  glow.addColorStop(1, "#101112");
-  ctx.fillStyle = glow;
-  ctx.fillRect(0, 0, width, height);
-
-  // 画面、齿孔与磨损同随 jitter 平移/旋转，背景光晕保持静止
-  ctx.save();
-  ctx.translate(x + filmWidth / 2 + jitterX, y + filmHeight / 2 + jitterY);
-  ctx.rotate(jitterAngle);
-  ctx.translate(-filmWidth / 2, -filmHeight / 2);
-  ctx.beginPath();
-  ctx.roundRect(0, 0, filmWidth, filmHeight, 5);
-  ctx.clip();
-  ctx.fillStyle = "#b9b9b6";
-  ctx.fillRect(0, 0, filmWidth, filmHeight);
-  ctx.fillStyle = "#1c1c1c";
-  ctx.fillRect(0, 0, railWidth, filmHeight);
-  ctx.fillRect(filmWidth - railWidth, 0, railWidth, filmHeight);
-
-  const holeCount = Math.max(4, Math.round(filmHeight / (railWidth * 1.6)));
-  const holeSize = railWidth * 0.32;
-  for (let i = 0; i < holeCount; i++) {
-    const holeY = ((i + 0.5) / holeCount) * filmHeight;
-    for (const railX of [railWidth / 2, filmWidth - railWidth / 2]) {
-      ctx.beginPath();
-      ctx.roundRect(railX - holeSize / 2, holeY - holeSize / 2, holeSize, holeSize, holeSize * 0.3);
-      ctx.fillStyle = "#050505b0";
-      ctx.fill();
-      ctx.strokeStyle = "#ffffff14";
-      ctx.lineWidth = 0.6;
-      ctx.stroke();
-    }
-  }
-
-  ctx.filter = `grayscale(1) contrast(1.08) brightness(${exposure})`;
-  ctx.drawImage(image, sx, sy, sw, sh,
-    pictureX + (pictureWidth - sw * scale) / 2,
-    (filmHeight - sh * scale) / 2, sw * scale, sh * scale);
-  ctx.filter = "none";
-
-  // 暖色灯光泄漏，强度随时间缓慢起伏
-  const leak = (Math.sin(frameTick * 0.02) + 1) / 2;
-  const leakGradient = ctx.createRadialGradient(filmWidth * 0.85, filmHeight * 0.12, 0, filmWidth * 0.85, filmHeight * 0.12, filmWidth * 0.6);
-  leakGradient.addColorStop(0, `rgba(255,150,60,${0.16 * leak})`);
-  leakGradient.addColorStop(1, "rgba(255,150,60,0)");
-  ctx.fillStyle = leakGradient;
-  ctx.fillRect(0, 0, filmWidth, filmHeight);
-
-  for (const scratch of scratches) {
-    const scratchX = scratch.x * filmWidth;
-    ctx.strokeStyle = scratch.light ? "#fff9e557" : "#17191860";
-    ctx.lineWidth = scratch.light ? 0.6 : 0.85;
-    ctx.beginPath();
-    ctx.moveTo(scratchX, scratch.top * filmHeight);
-    ctx.lineTo(scratchX + 0.7, filmHeight * 0.43);
-    ctx.moveTo(scratchX + 0.6, filmHeight * 0.44);
-    ctx.lineTo(scratchX - 0.4, scratch.bottom * filmHeight);
-    ctx.stroke();
-  }
-  if (splice) {
-    const spliceY = splice.y * filmHeight;
-    ctx.strokeStyle = "#00000090";
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.moveTo(0, spliceY);
-    ctx.lineTo(filmWidth, spliceY);
-    ctx.stroke();
-    ctx.strokeStyle = "#ffffff30";
-    ctx.lineWidth = 0.6;
-    ctx.beginPath();
-    ctx.moveTo(0, spliceY + 1.4);
-    ctx.lineTo(filmWidth, spliceY + 1.4);
-    ctx.stroke();
-  }
-  ctx.fillStyle = "#14151488";
-  ctx.strokeStyle = "#15161377";
-  ctx.lineWidth = 0.7;
-  for (const speck of dust) {
-    const dx = speck.x * filmWidth;
-    const dy = speck.y * filmHeight;
-    ctx.beginPath();
-    if (speck.fiber) {
-      ctx.moveTo(dx, dy);
-      ctx.quadraticCurveTo(dx + 4, dy - 3, dx + 2, dy + 5);
-      ctx.stroke();
-    } else {
-      ctx.ellipse(dx, dy, speck.size, speck.size * 0.55, speck.x * 6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  ctx.save();
-  ctx.translate(filmWidth / 2, filmHeight / 2);
-  ctx.scale(filmWidth / 2, filmHeight / 2);
-  const vignette = ctx.createRadialGradient(-0.06, -0.08, 0.2, 0, 0, 1.35);
-  vignette.addColorStop(0, "#fff8e509");
-  vignette.addColorStop(0.5, "#00000008");
-  vignette.addColorStop(0.82, "#00000048");
-  vignette.addColorStop(1, "#000000c9");
-  ctx.fillStyle = vignette;
-  ctx.fillRect(-1, -1, 2, 2);
-  ctx.restore();
-  ctx.strokeStyle = "#08090880";
-  ctx.lineWidth = 3;
-  ctx.strokeRect(1, 1, filmWidth - 2, filmHeight - 2);
-  ctx.shadowColor = "#080908";
-  ctx.shadowBlur = 2;
-  for (const bottom of [false, true]) {
-    ctx.beginPath();
-    for (let i = 0; i < gateWear.length; i++) {
-      const edgeX = i / (gateWear.length - 1) * filmWidth;
-      const edgeY = bottom ? filmHeight - gateWear[63 - i]! : gateWear[i]!;
-      if (i === 0) ctx.moveTo(edgeX, edgeY);
-      else ctx.lineTo(edgeX, edgeY);
-    }
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  const grain = grains[grainIndex];
-  if (grain) {
-    ctx.save();
-    ctx.globalCompositeOperation = "soft-light";
-    ctx.globalAlpha = 0.28;
-    ctx.translate(-grainOffset, -grainOffset);
-    ctx.fillStyle = grain;
-    ctx.fillRect(0, 0, width + 192, height + 192);
-    ctx.restore();
-  }
-}
-
-function pause() {
-  clearTimeout(pauseTimer);
-  cancelAnimationFrame(animationId);
-  animationId = 0;
-}
-
-function tick(time: number) {
-  if (time - lastFrameTime >= frameDuration) {
-    lastFrameTime = time - (time - lastFrameTime) % frameDuration;
-    frameIndex = (frameIndex + 1) % 16;
-    ageFilm();
-    draw();
-  }
-  animationId = requestAnimationFrame(tick);
-}
-
-function play() {
-  if (!isReady || !width || !height || reducedMotion.matches || document.hidden) return;
-  clearTimeout(pauseTimer);
-  if (!animationId) {
-    lastFrameTime = performance.now();
-    animationId = requestAnimationFrame(tick);
-  }
-  pauseTimer = setTimeout(pause, 150);
-}
-
-function resize() {
-  const canvas = filmCanvas.value;
-  if (!canvas) return;
-  const bounds = canvas.getBoundingClientRect();
-  width = bounds.width;
-  height = bounds.height;
-  pixelRatio = Math.min(window.devicePixelRatio, 2);
-  canvas.width = Math.round(width * pixelRatio);
-  canvas.height = Math.round(height * pixelRatio);
-  if (!width || !height) pause();
-  draw();
+/** 系统开了「减少动效」就别自动播放（CSS 动画也在样式里一并关掉）。 */
+function syncMotion() {
+  const video = filmVideo.value;
+  if (!video) return;
+  if (reducedMotion.matches) video.pause();
+  else void video.play().catch(() => undefined);
 }
 
 onMounted(() => {
-  const canvas = filmCanvas.value!;
-  context = canvas.getContext("2d");
-  if (!context) return;
-  reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  for (let i = 0; i < 4; i++) {
-    const tile = document.createElement("canvas");
-    tile.width = tile.height = 192;
-    const tileContext = tile.getContext("2d")!;
-    const pixels = tileContext.createImageData(192, 192);
-    for (let p = 0; p < pixels.data.length; p += 4) {
-      const value = Math.floor(Math.random() * 256);
-      pixels.data[p] = pixels.data[p + 1] = pixels.data[p + 2] = value;
-      pixels.data[p + 3] = 255;
-    }
-    tileContext.putImageData(pixels, 0, 0);
-    const pattern = context.createPattern(tile, "repeat");
-    if (pattern) grains.push(pattern);
-  }
-  image = new Image();
-  image.onload = () => {
-    ageFilm();
-    resize();
-    isReady = true;
-  };
-  image.src = filmUrl;
-  resizeObserver = new ResizeObserver(resize);
-  resizeObserver.observe(canvas);
-  window.addEventListener("mousemove", play, { passive: true });
-  window.addEventListener("blur", pause);
-  document.addEventListener("visibilitychange", pause);
-  reducedMotion.addEventListener("change", pause);
+  syncMotion();
+  reducedMotion.addEventListener("change", syncMotion);
 });
-
-onUnmounted(() => {
-  pause();
-  resizeObserver?.disconnect();
-  if (image) image.onload = null;
-  window.removeEventListener("mousemove", play);
-  window.removeEventListener("blur", pause);
-  document.removeEventListener("visibilitychange", pause);
-  reducedMotion?.removeEventListener("change", pause);
-});
+onBeforeUnmount(() => reducedMotion.removeEventListener("change", syncMotion));
 </script>
 
 <style lang="scss" scoped>
 .bgArt {
   position: absolute;
   inset: 0;
+  display: grid;
+  place-items: center;
   overflow: hidden;
-  background: #111213;
   pointer-events: none;
+  /* 原来 canvas 里那圈"投影光晕"：中心暖灰、四周压到近黑。 */
+  background: radial-gradient(circle at 50% 50%, #77766f 0%, #242525 55%, #101112 100%);
+}
 
-  canvas {
-    display: block;
-    width: 100%;
+.film {
+  position: relative;
+  /* 胶片窗口尺寸 = 原公式 min(宽×0.94, 高×0.8×181/125) 再 **缩小 15%**（用户要求）：
+       宽：0.94 × 0.85            = 79.9%
+       高：0.8 × 181/125 × 0.85   = 0.985 → 折算成"容器高度（100vh-16px）的 98.5%" */
+  width: min(79.9%, calc((100vh - 16px) * 0.985));
+  aspect-ratio: 181 / 125;
+  overflow: hidden;
+  border-radius: 5px;
+  background: #131414;
+  /* 画格外沿的黑描边 + 投影（原来靠 canvas 的 strokeRect + shadowBlur）。 */
+  box-shadow: 0 0 0 3px rgb(8 9 8 / 50%), 0 22px 48px rgb(0 0 0 / 50%);
+  /* 胶片跳帧的轻微位移/旋转 —— transform 动画在合成器上跑，代价可忽略。 */
+  animation: filmJitter 0.36s steps(2, end) infinite;
+
+  .filmVideo {
+    position: absolute;
+    /* 左右各留 6% 给片轨，正好复刻原来 181:125 画格里的成像区。 */
+    inset: 0 6% 0 6%;
+    width: 88%;
     height: 100%;
+    /* 影片是 16:9、画格是 181:125 ⇒ contain：完整显示整幅画面，上下留一点暗边。 */
+    object-fit: contain;
+    background: #0c0d0d;
+  }
+
+  /* ---------- 片轨 + 齿孔：黑轨上一排深色圆孔，按 15px 一节重复 ---------- */
+  .rail {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 6%;
+    background-color: #1c1c1c;
+    background-image: radial-gradient(circle 4px at 50% 7.5px, rgb(5 5 5 / 78%) 0 68%, rgb(255 255 255 / 7%) 72% 100%, transparent 100%);
+    background-size: 100% 15px;
+    background-repeat: repeat-y;
+  }
+  .railLeft {
+    left: 0;
+  }
+  .railRight {
+    right: 0;
+  }
+
+  /* ---------- 老胶片滤镜层（全部叠在视频之上） ---------- */
+
+  /* 暖色灯光泄漏，缓慢起伏 */
+  .leak {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 85% 12%, rgb(255 150 60 / 20%), transparent 58%);
+    animation: leakBreathe 7s ease-in-out infinite;
+  }
+
+  /* 偶发划痕：两条细竖线，各自按不同周期闪一下并轻微移动 */
+  .scratch {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 58%;
+    width: 1px;
+    background: linear-gradient(to bottom, transparent, rgb(255 249 229 / 40%) 22%, rgb(255 249 229 / 16%) 72%, transparent);
+    opacity: 0;
+    animation: scratchFlash 6.5s steps(1, end) infinite;
+  }
+  .scratchAlt {
+    left: 31%;
+    width: 2px;
+    background: linear-gradient(to bottom, transparent, rgb(18 20 19 / 45%) 30%, transparent 80%);
+    animation-duration: 9.5s;
+    animation-delay: 2.4s;
+  }
+
+  /* 暗角 */
+  .vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at 47% 46%, rgb(255 248 229 / 4%) 0%, rgb(0 0 0 / 3%) 50%, rgb(0 0 0 / 28%) 82%, rgb(0 0 0 / 79%) 100%);
+  }
+
+  /* 颗粒：一张静态噪点贴图 + 两帧一跳的位移（soft-light 让它只加质感、不改色） */
+  .grain {
+    position: absolute;
+    /* 放大一圈，位移时不会露出边缘。 */
+    inset: -10%;
+    background-repeat: repeat;
+    background-size: 160px 160px;
+    mix-blend-mode: soft-light;
+    opacity: 0.42;
+    animation: grainShift 0.4s steps(2, end) infinite;
+  }
+}
+
+@keyframes filmJitter {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate3d(0.7px, -0.9px, 0) rotate(0.05deg);
+  }
+  100% {
+    transform: translate3d(-0.6px, 0.8px, 0) rotate(-0.04deg);
+  }
+}
+
+@keyframes grainShift {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-13px, 9px, 0);
+  }
+}
+
+@keyframes leakBreathe {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+@keyframes scratchFlash {
+  0%,
+  86%,
+  100% {
+    opacity: 0;
+    transform: translateX(0);
+  }
+  87%,
+  94% {
+    opacity: 0.85;
+    transform: translateX(-15px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .film,
+  .film .grain,
+  .film .leak,
+  .film .scratch {
+    animation: none;
+  }
+  .film .scratch {
+    opacity: 0;
   }
 }
 </style>
