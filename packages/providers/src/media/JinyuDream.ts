@@ -7,19 +7,20 @@ const rules = [
     props: { type: "password", showPassword: true, autocomplete: "off" },
   },
   {
-    // 为什么还需要第二把 key —— 本网关（linke）**不转发**绝大多数参考素材字段，
-    // 所以「带参考素材的生成」会改走 toapis 直连，而 toapis 的生成接口**只收公网
-    // URL**（官方原话：「我们不再支持在生成接口中直接传入 base64 图片数据」）。
-    // 画布上的素材是本地文件 ⇒ 必须先上传换公网地址，这一步需要一把 toapis 密钥。
+    // ⚠️ 2026-10-14 起：**这把 key 不再需要了**，留空即可。
     //
-    // linke 侧的实测（2026-10-12，逐字段对照）：它**只转发单张 `image`** 这一个字段，
-    //   `image_urls` / `image_with_roles` / `reference_images` / `video_with_roles` /
-    //   `audio_with_roles` 全部被丢弃（生效率 0.7% vs 直连 22.1%）。
-    // 所以带素材时直连 toapis 是唯一能真正生效的路子；留空这把 key 时，
-    // 软件会在本地拦下并明确提示（不会发出去白花钱）。上传接口是免费的。
+    // 以前「带参考素材的生成」会直连 toapis，而 toapis 的生成接口只收公网 URL
+    // （官方原话：「我们不再支持在生成接口中直接传入 base64 图片数据」）⇒ 本地素材
+    // 必须先传到它那里换地址，这一步用它。
+    //
+    // 现在素材改成 **base64 直接内嵌**，由网关侧的 `toapi-forwarder` 转存到
+    // **自建阿里云 OSS**（bucket `linke-ai`）再发给上游 —— 整条链路只认「Linke API Key」
+    // 那一把，素材也不再经手 toapis 的账户。
+    //
+    // 字段保留只为不破坏老装机已有的配置（填了也无害）；新装可以留空。
     type: "input",
     field: "uploadApiKey" as const,
-    title: "素材上传密钥（toapis）",
+    title: "素材上传密钥（已不再需要，可留空）",
     value: "",
     props: { type: "password", showPassword: true, autocomplete: "off" },
   },
@@ -53,32 +54,35 @@ function object(value: unknown): Record<string, unknown> {
 }
 
 /**
- * 两条链路。
+ * 链路：**一律走 Linke**（`api.linke.link`）。
  *
- * ## 为什么会有两条
- * 本网关（linke，new-api）对**参考素材**的转发是**残缺**的 —— 2026-10-12 逐字段实测：
+ * ## 2026-10-14 改（此前是「带素材直连 toapis」）
  *
- * | 字段 | linke 的结果 |
- * |---|---|
- * | `image_urls`（gpt-image 的官方字段，数组） | **被丢弃** → 参考图完全没生效（黑色像素 0.7%） |
- * | `image`（单张字符串） | ✅ **被转发**，且 linke 会替上游换成它需要的字段（实测 22.3% 生效） |
- * | `image: [url1, url2]`（数组） | **HTTP 400**：`json: cannot unmarshal array into Go struct field .Alias.image of type string` |
- * | `image_with_roles` / `reference_images`（视频用的） | 同样**被丢弃** —— 用户报的「视频只收到文字」就是这个 |
+ * 旧结论「Linke 丢弃参考素材字段」只在**客户端侧**看起来成立 —— 真正的原因是
+ * new-api 的任务适配器用严格结构体 `relaycommon.TaskSubmitReq` 解析请求，只认
+ * `prompt / model / mode / image / images / size / duration / seconds / input_reference / metadata`，
+ * 其余键**静默丢弃**（`ratio`、`resolution`、`reference_images`、`image_with_roles` … 都是这样没的；
+ * `image: [a, b]` 还会 400，因为结构体里它是 string）。
  *
- * 也就是说 linke **只支持单张 `image`**，多图、参考视频、参考音频一律过不去。
- * 而 toapis 原生完全支持（多图 ≤16 张、`image_with_roles`/`video_with_roles`/`audio_with_roles`…），
- * 实测**绕过 linke 直连 toapis 时同一请求 22.1% 生效**。
+ * 但 **`metadata` 是唯一能装任意 JSON 的字段**，而网关上的任务插件（new-api 的
+ * `task_plugins` 表里那条 `sora`，当前 `1.0.10-models`）会把 `metadata` 里的键
+ * **展开回顶层**再转发给 ToAPI ⇒ 客户端把业务参数整包放进 `metadata`（见 `linkeTaskBody`）
+ * 就能原样透传。
  *
- * ## 规则
- * · **没有参考素材** → 走 linke（产品的主通道，保持「锁定本网关」的形态）；
- * · **带参考素材**（图片/视频/音频、首尾帧）→ **直连 toapis**，用「素材上传密钥」那把 key。
+ * 素材同理：**直接内嵌 base64 data URL**，由网关侧的 `toapi-forwarder` 换成
+ * **自建阿里云 OSS 的公网签名 URL** 再发给上游 —— 不再需要 toapis 的「素材上传密钥」，
+ * 也不再有「带素材就绕过网关」这条旁路。
  *
- * 两条链路的协议差异只有两点：路径的单复数（linke `video/generations` vs toapis `videos/generations`）
- * 与任务 ID 的字段名（linke `task_id` vs toapis `id`，`taskIdOf` 两个都认）。
+ * 2026-10-14 已在服务器侧实测通过：`wan3.0-video` + 参考图经 Linke 提交成功，
+ * forwarder 日志可见「1 张内嵌图换成公网 URL（OSS）」，Linke 后台把这笔记在了
+ * `wan3.0-video` 名下（额度、resolution、seconds 都对）。
+ *
+ * 链路协议差异：路径的单复数（linke `video/generations` vs toapis `videos/generations`）
+ * 与任务 ID 的字段名（linke `task_id` vs toapis `id`，`taskIdOf` 两个都认）—— 走网关时以 linke 为准。
  */
 type Route = { base: string; path: string; key: string; label: string };
 
-/** toapis 直连的基础地址（国内站）。 */
+/** toapis 直连的基础地址 —— ⚠️ 2026-10-14 起**不再使用**（带素材也一律走 Linke），保留仅为可查。 */
 function directBase() {
   return `${uploadBase}/v1`;
 }
@@ -88,26 +92,33 @@ function routeKey(context: ProviderContext<Record<string, unknown>>, field: "api
   return typeof raw === "string" ? raw.trim().replace(/^Bearer\s+/i, "").trim() : "";
 }
 
+/** 选链路 —— 现在**只有一条**：本网关（Linke）。见上方长注释。 */
+function pickRoute(context: ProviderContext<Record<string, unknown>>): Route {
+  const key = routeKey(context, "apiKey");
+  if (!key) throw new Error("请填写 Linke API Key");
+  // linke 是 new-api：图片也走 `video/generations` 这个**通用任务队列**（见 generateImage 的说明）。
+  return { base: apiUrl, path: "video/generations", key, label: "Linke" };
+}
+
 /**
- * 选链路。
- * @param direct 本次是否带参考素材 —— 带就必须直连 toapis（原因见上方长注释）。
+ * 把请求体整包塞进 `metadata`。
+ *
+ * new-api 的任务结构体只认那几个白名单字段，其余一律丢弃 —— 所以业务参数
+ * （`ratio` / `resolution` / `reference_images` / `image_with_roles` / `audio` / `watermark` …）
+ * 必须借 `metadata` 过境，由网关插件的 `requestValues()` 展开回顶层。
+ *
+ * `model` / `prompt` 留在顶层：插件 `buildSubmitRequest` 会校验 `prompt`；
+ * `duration` 也留顶层（结构体认它，网关侧计费按它算秒数）。
  */
-function pickRoute(context: ProviderContext<Record<string, unknown>>, mediaType: "image" | "video", direct: boolean): Route {
-  if (!direct) {
-    const key = routeKey(context, "apiKey");
-    if (!key) throw new Error("请填写 Linke API Key");
-    // linke 是 new-api：图片也走 `video/generations` 这个**通用任务队列**（见 generateImage 的说明）。
-    return { base: apiUrl, path: "video/generations", key, label: "Linke" };
-  }
-  const key = routeKey(context, "uploadApiKey");
-  if (!key) {
-    throw new Error(
-      "这次生成带了参考素材，而本网关（Linke）只转发**单张**参考图、参考视频与参考音频一律丢失（实测），" +
-      "所以软件改用 toapis 直连 —— 这需要在「设置 → 媒体模型 → Linke → 编辑」里填写**素材上传密钥（toapis）**。",
-    );
-  }
-  // toapis 原生协议：路径是**复数**，图片与视频各一个端点。
-  return { base: directBase(), path: mediaType === "image" ? "images/generations" : "videos/generations", key, label: "toapis" };
+function linkeTaskBody(body: Record<string, unknown>): Record<string, unknown> {
+  const { model, prompt, duration, metadata, ...rest } = body;
+  // 调用方（`request.other`）可能自己带了 `metadata`，先与业务参数合并再整包下发，
+  // 否则会套成 `metadata.metadata` 而被网关插件的展开逻辑丢掉。
+  const merged = {
+    ...(metadata && typeof metadata === "object" && !Array.isArray(metadata) ? (metadata as Record<string, unknown>) : {}),
+    ...rest,
+  };
+  return { model, prompt, ...(duration === undefined ? {} : { duration }), metadata: merged };
 }
 
 async function fetchJson(context: ProviderContext, route: Route, path: string, body?: unknown, signal = context.signal) {
@@ -148,10 +159,10 @@ const uploadEndpoints: Record<InlineField, string> = { image: "images", video: "
 const uploadLimit = 10 * 1024 * 1024;
 
 /**
- * 把本地素材上传到 toapis，换取**公网 URL**（见 `rules` 里 `uploadApiKey` 的说明）。
+ * 把本地素材上传到 toapis，换取**公网 URL**。
  *
- * 只在「目标模型/字段不收 base64」+「素材是本地文件」这一种组合下才会走到这里 ——
- * 上传是免费的，且换来的 URL 在 linke 生成时能被上游直接拉取。
+ * ⚠️ 2026-10-14 起**不再被调用**（`referenceUrl` 改为直接内嵌 data URL，由网关侧的
+ * `toapi-forwarder` 转存到自建 OSS）。实现保留在这里，是为了万一要切回「预上传」模式时不至于重写。
  */
 async function uploadReference(
   context: ProviderContext<Record<string, unknown>>,
@@ -218,26 +229,35 @@ async function uploadReference(
   return url;
 }
 
+/**
+ * 取参考素材的「可用地址」。
+ *
+ * · 本来就是公网 URL → 原样用；
+ * · 本地文件 → **直接内嵌成 base64 data URL**（不再预上传）。
+ *
+ * 内嵌图会在网关侧由 `toapi-forwarder` 换成**自建 OSS 的公网签名 URL** 再发给上游，
+ * 所以这里不需要（也不该）先调 toapis 的上传口 —— 少一次往返、少一把密钥，
+ * 素材还留在我们自己家里。单张上限与 forwarder 保持一致（10 MB）。
+ */
 async function referenceUrl(
-  context: ProviderContext<Record<string, unknown>>,
+  _context: ProviderContext<Record<string, unknown>>,
   input: MediaInput,
   kind: string,
   _model: string,
-  field: InlineField,
-  signal?: AbortSignal,
+  _field: InlineField,
+  _signal?: AbortSignal,
 ): Promise<string> {
   if (input.type === "url") {
     if (!/^https?:\/\//i.test(input.url)) throw new Error(`参考${kind}需要 HTTP 或 HTTPS 地址`);
     return input.url;
   }
-  // 本地素材：**一律**先上传到 toapis 换成公网 URL。
-  //
-  // ⚠️ 这里曾经按模型判断「要不要内嵌 base64」，依据是官方文档列出 seedance 支持
-  //    `data:image/<format>;base64,...`。但**实测文档在这条链路上不成立**：
-  //    图片（gpt-image-2）与视频（seedance-2-mini）发 data URL 都被回
-  //    `500 输入参数无效`（0.3 秒即失败）。而上传是**免费**的（几百毫秒），
-  //    所以统一走上传 —— 不再猜哪个模型支持什么，也就不会再因为这条推断踩坑。
-  return uploadReference(context, input, kind, field, signal);
+  const bytes = input.type === "binary" ? input.data : Buffer.from(input.data, "base64");
+  if (!bytes.byteLength) throw new Error(`参考${kind}是空文件，无法引用`);
+  if (bytes.byteLength > uploadLimit) {
+    throw new Error(`${kind}过大（${(bytes.byteLength / 1024 / 1024).toFixed(1)} MB，上限 ${uploadLimit / 1024 / 1024} MB），请先压缩再引用。`);
+  }
+  const mimeType = input.mimeType || "application/octet-stream";
+  return `data:${mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
 }
 
 /** 模型族。seedance 与 wan3.0 的字段名不一样（见下方 generateVideo 的注释）。 */
@@ -750,8 +770,8 @@ export default {
     //         `https://files.toapis.cn/images/tsk_img_…/xxx.png`，整单约 ¥0.8）。
     //    端点名字叫 video，但它是任务队列，图片模型一样跑。
     // 有参考图 → 直连 toapis（linke 会把 `image_urls` 整个丢掉，见文件上方 Route 的说明）。
-    const route = pickRoute(this, "image", images.length > 0);
-    const url = await generateTask(this, route, "image", body, signal);
+    const route = pickRoute(this);
+    const url = await generateTask(this, route, "image", linkeTaskBody(body), signal);
     return [{ mediaType: "image", type: "url", url }];
   },
   async generateVideo(request: VideoRequest): Promise<MediaAsset[]> {
@@ -860,12 +880,10 @@ export default {
       if (videos.length) body.video_with_roles = videos.map(url => ({ url, role: "reference_video" }));
       if (audios.length) body.audio_with_roles = audios.map(url => ({ url, role: "reference_audio" }));
     }
-    // 只要有**任何一种**参考素材（图 / 视频 / 音频 / 首尾帧），就必须直连 toapis ——
-    // linke 只会转发单张 `image`，`image_with_roles` / `reference_images` / `video_with_roles` /
-    // `audio_with_roles` 全被丢弃（这就是「视频只收到文字」的根因，见文件上方 Route 的说明）。
-    const direct = images.length + videos.length + audios.length + frames.length > 0;
-    const route = pickRoute(this, "video", direct);
-    const url = await generateTask(this, route, "video", { ...body, ...(request.other ?? {}) }, signal);
+    // 素材（图 / 视频 / 音频 / 首尾帧）照常放进 body，由 `linkeTaskBody` 收进 metadata 过网关；
+    // 其中的本地素材已被 referenceUrl 内嵌成 data URL，网关侧会换成自建 OSS 的公网地址。
+    const route = pickRoute(this);
+    const url = await generateTask(this, route, "video", linkeTaskBody({ ...body, ...(request.other ?? {}) }), signal);
     return [{ mediaType: "video", type: "url", url, mimeType: "video/mp4" }];
   },
 } satisfies ProviderDefinition<typeof rules>;
