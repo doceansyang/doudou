@@ -112,6 +112,7 @@ declare module 'vue' {
     TfAccount: typeof import('./../components/settings/tfAccount.vue')['default']
     TfRechargeDialog: typeof import('./../components/settings/tfRechargeDialog.vue')['default']
     ToolMessage: typeof import('./../components/agent/toolMessage.vue')['default']
+    TopActions: typeof import('./../components/topActions.vue')['default']
     Ui: typeof import('./../components/settings/panels/ui.vue')['default']
     UpdateBox: typeof import('./../components/updateBox.vue')['default']
   }

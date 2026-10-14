@@ -1,6 +1,9 @@
 <template>
   <main class="hello" :class="{ configuring: view !== 'welcome' }">
-    <div class="pageLanguage"><languageSelect popover /></div>
+    <!-- 首屏右上角：语言 / 设置 / 主题。与项目列表页**共用同一个组件**。 -->
+    <div class="topActionsHost">
+      <topActions @open-settings="settingsVisible = true" />
+    </div>
     <section class="welcomePanel" aria-labelledby="welcomeTitle">
       <div v-if="view !== 'welcome'" class="providerContent">
         <header class="providerHeader">
@@ -56,10 +59,6 @@
     </section>
     <div class="artPanel" aria-hidden="true">
       <bg class="artBg" />
-      <div class="artBrand">
-        <span class="artLogo" v-html="logoSvg" />
-        <span class="artName">JinyuTV</span>
-      </div>
     </div>
 
     <!-- 等待扫码：登录窗是**独立的操作系统窗口**（不是本页里的弹层），
@@ -107,7 +106,7 @@
         选一个浏览器，读它里面<b>已登录的豆包账号</b>（只读，账号只保存在本机）。<br />
         它必须先<b>完全退出</b>：运行中登录数据是被独占的，读不到。⚠️ <b>只关窗口往往不够</b>
         ——Edge 默认开着「启动增强 / 关闭后继续运行后台扩展」，会留一堆进程常驻；
-        遇到这种情况直接点右边那颗「退出并同步」。
+        遇到这种情况直接点右边那颗「关闭并同步」（点之前会再问你一次，绝不会自己关掉你的浏览器）。
       </p>
 
       <div v-if="browserLoading" class="pickerState">正在扫描本机浏览器…</div>
@@ -137,7 +136,7 @@
             :loading="closingId === item.id"
             :disabled="browserBusy || Boolean(closingId)"
             @click="closeAndSync(item)">
-            退出并同步
+            关闭并同步
           </el-button>
         </li>
       </ul>
@@ -153,6 +152,9 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 右上角「设置」图标打开的设置面板：与项目列表页用的是同一个组件。 -->
+    <settings v-model="settingsVisible" />
   </main>
 </template>
 
@@ -160,7 +162,7 @@
 import axios from "axios";
 import { defineAsyncComponent, onMounted, onBeforeUnmount, ref } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { IconArrowLeft } from "@tabler/icons-vue";
 import JinyuDream from "@toonflow/providers/language/JinyuDream";
 import JinyuDreamSource from "@toonflow/providers/media/JinyuDream?raw";
@@ -169,7 +171,8 @@ import { customProviders, saveSettings } from "@/stores/settings";
 import type { MediaProvider } from "@/components/settings/panels/mediaModel/types";
 import { useHelloStore } from "@/stores/hello";
 import anonymousData from "@/lib/anonymousData";
-import logoSvg from "@toonflow/assets/logo.svg?raw";
+import settings from "@/components/settings/index.vue";
+import topActions from "@/components/topActions.vue";
 import bg from "./bg.vue";
 import languageSelect from "@/components/languageSelect.vue";
 
@@ -184,6 +187,11 @@ const saving = ref(false);
 const router = useRouter();
 const hello = useHelloStore();
 let loginRequest: AbortController | undefined;
+
+/* -------------------------------------------------- 右上角：设置面板 */
+
+/** 右上角「设置」图标打开的设置面板（与项目列表页用的是同一个组件）。 */
+const settingsVisible = ref(false);
 
 function openLogin() {
   const url = new URL(loginUrl.value);
@@ -336,16 +344,35 @@ async function syncPickedBrowser() {
 }
 
 /**
- * 「退出并同步」——用户点了这个浏览器的行内按钮时：
- *   1) 先让后端把它**真退干净**（含「启动增强」留下的后台常驻进程）；
- *   2) 等它把登录数据放开（后端会轮询确认，最多 15s）；
- *   3) 直接开始同步 —— 按钮语义就是一步到位，不再让用户自己再点一次。
+ * 「关闭并同步」——**只有用户亲自确认后才会动浏览器**。
  *
- * ⚠️ 会关掉这个浏览器**所有窗口/标签页**（它开着的话）。Edge 一般能"恢复上次会话"，
- * 所以先在界面上把这句话说清楚，再让用户点。
+ * 背景：读登录数据必须让浏览器完全退出（profile 单实例 + Cookies 独占），所以这台机器上
+ * 确实存在"必须关掉它"的场景；但**关浏览器会连带关掉用户所有窗口**，绝不能一点就执行。
+ * 因此这里先弹确认框，且默认路径是「我自己关」—— 用户不点头，我们绝不动他的浏览器。
+ *
+ * 确认后：1) 后端把它真退干净（含「启动增强」留下的后台常驻进程）；
+ *        2) 等它把登录数据放开（后端轮询确认，最多 15s）；
+ *        3) 直接开始同步 —— 按钮语义就是一步到位，不再让用户自己再点一次。
  */
 async function closeAndSync(item: BrowserItem) {
   if (browserBusy.value || closingId.value) return;
+  try {
+    await ElMessageBox.confirm(
+      `同步需要先让 ${item.name} 完全退出（读登录数据时它占用着这些文件）。这会关闭它现在打开的所有窗口 —— Edge/Chrome 一般能在下次启动时恢复上次会话。`,
+      `要帮你关闭 ${item.name} 吗？`,
+      {
+        confirmButtonText: "帮我关闭并同步",
+        cancelButtonText: "我自己关",
+        type: "warning",
+        distinguishCancelAndClose: true,
+        appendToBody: true,
+      },
+    );
+  } catch {
+    // 选了「我自己关」或直接关掉对话框：只给指引，不碰他的浏览器。
+    ElMessage.info(`好的，请把 ${item.name} 完全退出（含后台常驻进程）后，再点「开始同步」。`);
+    return;
+  }
   closingId.value = item.id;
   browserError.value = "";
   try {
@@ -613,19 +640,22 @@ onBeforeUnmount(() => {
 <style lang="scss" scoped>
 .hello {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* 黄金分割：左 1 : 右 1.618（右侧动画区更大）。
+     用户口径（2026-10-14）：**不要从中间五五开**。 */
+  grid-template-columns: 1fr 1.618fr;
   min-height: 100svh;
   padding: 8px;
   background: var(--el-bg-color);
   color: var(--el-text-color-primary);
   font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 
-  .pageLanguage {
+  /* 右上角图标组（语言 / 设置 / 主题）：这里只管"浮在右侧艺术面板右上角"的位置，
+     三颗按钮本身的样式在 topActions 组件里（两个页面共用）。 */
+  .topActionsHost {
     position: fixed;
-    top: 16px;
-    inset-inline-end: calc(50% + 8px);
-    z-index: 2;
-    max-width: calc(50% - 24px);
+    top: 32px;
+    inset-inline-end: 32px;
+    z-index: 3;
   }
 
   .welcomePanel {
@@ -666,7 +696,8 @@ onBeforeUnmount(() => {
         overscroll-behavior: contain;
         background-color: #fff;
         border-radius: var(--ui-radius);
-        width: 500px;
+        /* 左栏现在只占 1/2.618，写死 500px 会顶破栏宽 ⇒ 跟着栏宽走、最多 500。 */
+        width: min(500px, 100%);
 
         .loginFrame {
           display: block;
@@ -818,37 +849,6 @@ onBeforeUnmount(() => {
     .artBg {
       z-index: 0;
     }
-
-    .artBrand {
-      position: relative;
-      z-index: 1;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      color: #fff;
-
-      .artLogo {
-        width: 44px;
-        height: 44px;
-        line-height: 0;
-
-        :deep(svg) {
-          display: block;
-          width: 100%;
-          height: 100%;
-        }
-
-        :deep(path) {
-          fill: #fff;
-        }
-      }
-
-      .artName {
-        font-size: 30px;
-        font-weight: 600;
-        letter-spacing: 0.4px;
-      }
-    }
   }
 
   /* 等待扫码遮罩：登录窗是独立的系统窗口，这里只负责说明 + 提供取消。
@@ -917,9 +917,9 @@ onBeforeUnmount(() => {
   @media (max-width: 700px) {
     grid-template-columns: 1fr;
 
-    .pageLanguage {
+    .topActionsHost {
+      top: 16px;
       inset-inline-end: 16px;
-      max-width: calc(100% - 32px);
     }
 
     .welcomePanel {

@@ -12,11 +12,18 @@
     :popperStyle="{ maxWidth: 'calc(100vw - 32px)', padding: '12px', borderRadius: '14px' }"
     @after-enter="popoverPanel?.focusSelected()">
     <template #reference>
-      <button ref="triggerButton" class="languageTrigger" type="button" :aria-label="translate('语言')" @keydown.esc.stop.prevent="closePopover">
+      <button
+        ref="triggerButton"
+        class="languageTrigger"
+        :class="{ isIconOnly: iconOnly }"
+        type="button"
+        :aria-label="iconOnly ? translate('语言') : undefined"
+        :title="iconOnly ? selectedName : undefined"
+        @keydown.esc.stop.prevent="closePopover">
         <icon-world v-if="uiSettings.language === 'system'" :size="20" aria-hidden="true" />
         <svg v-else class="languageFlag" viewBox="0 0 32 24" aria-hidden="true"><use :href="`${languageFlags}#${flagIds[locale]}`" /></svg>
-        <span class="triggerName" :lang="locale" dir="auto">{{ selectedName }}</span>
-        <icon-chevron-down class="triggerChevron" :class="{ opened: visible }" :size="15" aria-hidden="true" />
+        <span v-if="!iconOnly" class="triggerName" :lang="locale" dir="auto">{{ selectedName }}</span>
+        <icon-chevron-down v-if="!iconOnly" class="triggerChevron" :class="{ opened: visible }" :size="15" aria-hidden="true" />
       </button>
     </template>
     <div class="languagePopup" @keydown.esc.stop.prevent="closePopover">
@@ -72,7 +79,8 @@ import { locale, translate } from "@toonflow/i18n/vue";
 import { uiSettings, updateUiSettings } from "@/stores/settings";
 import languageFlags from "@/assets/languageFlags.svg?url";
 
-defineProps<{ popover?: boolean }>();
+// `iconOnly`：只要一颗图标按钮（不显示语言名与展开箭头），用于首屏右上角的图标组。
+defineProps<{ popover?: boolean; iconOnly?: boolean }>();
 const emit = defineEmits<{ select: [] }>();
 const visible = ref(false);
 const panel = ref<HTMLDivElement>();
@@ -158,6 +166,18 @@ defineExpose({ focusSelected });
     color: var(--el-text-color-secondary);
     transition: transform 0.18s;
     &.opened { transform: rotate(180deg); }
+  }
+  /* 仅图标模式：与首屏右上角另外两颗图标按钮**同规格**（40×40 圆角方钮），
+     只显示当前语言旗标（跟随系统时是地球图标），不显示语言名与展开箭头。 */
+  &.isIconOnly {
+    justify-content: center;
+    box-sizing: border-box;
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0;
+    gap: 0;
   }
   &:hover { border-color: var(--el-color-primary-light-5); box-shadow: var(--el-box-shadow-lighter); }
   &:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 3px; }

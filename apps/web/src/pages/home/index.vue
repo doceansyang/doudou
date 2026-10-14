@@ -2,9 +2,9 @@
   <el-container class="home">
     <bg class="pageBackground" />
     <el-header class="pageHeader">
-      <el-badge isDot :hidden="!hasDesktopUpdate">
-        <el-button round size="large" :icon="IconSettings" :aria-label="hasDesktopUpdate ? '设置，有新版本可用' : '设置'" @click="settingsVisible = true">设置</el-button>
-      </el-badge>
+      <!-- 与快速开始页同一组图标按钮（语言 / 设置 / 主题）。
+           设置那颗挂「有新版本」红点，逻辑照旧。 -->
+      <topActions :update-badge="hasDesktopUpdate" @open-settings="settingsVisible = true" />
     </el-header>
     <el-main class="pageContent">
       <section class="creationPanel" aria-label="创建项目">
@@ -88,7 +88,6 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox, type InputInstance } from "element-plus";
 import {
-  IconSettings,
   IconArrowUp, IconLayoutGrid,
   IconList, IconSortDescending,
   IconSortAscending, IconFolder, IconEdit,
@@ -102,6 +101,7 @@ import { useWorkspaceStore, type Project } from "@/stores/workspace";
 import { hasDesktopUpdate } from "@/stores/desktopUpdate";
 import useWorkspaceFiles from "@/lib/workspaceFiles";
 import settings from "@/components/settings/index.vue";
+import topActions from "@/components/topActions.vue";
 import bg from "./bg.vue";
 import workspacePicker from "./workspacePicker.vue";
 
@@ -407,6 +407,8 @@ async function createProject(fromPrompt = true) {
   .pageHeader {
     display: flex;
     align-items: center;
+    /* 图标组贴右上角（原来只有一颗「设置」时是靠左的，现在与快速开始页对齐到右侧）。 */
+    justify-content: flex-end;
     height: 68px;
     margin: 16px clamp(16px, 3.2vw, 48px) 0;
     padding: 0;
