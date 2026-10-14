@@ -1968,7 +1968,7 @@ export type BrowserAccount = { uid?: string; sessionId: string };
 /**
  * 从 `multi_sids` / `x-tt-multi-sids` 的值里解析出**全部**已登录账号。
  *
- * 实测值形如 `1234567890123456%3A7bebca…`（URL 编码把 `:` 写成 `%3A`）。
+ * 实测值形如 `1234567890123456%3Aabcdef…`（URL 编码把 `:` 写成 `%3A`）。
  * 多账号时是多个这样的片段拼接，分隔符官方没有承诺 —— 所以这里全文捞出所有
  * `uid:sessionid` 对，**不依赖分隔符**，豆包改版也不会失配。
  */

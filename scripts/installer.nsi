@@ -73,9 +73,31 @@ Section "主程序" SecMain
   nsExec::ExecToLog 'taskkill /IM "bun.exe" /F'
   Pop $0
 
-  ; 整个绿色版（含 runtime/bun.exe、build 产物、data）
-  ; 排除 logs：运行中的日志文件会被服务占用，且没必要打进安装包
-  File /r /x "logs" /x "*.log" "${SOURCE_DIR}\*.*"
+  ; 程序本体 + data 里的**程序资源**（nodes / providers / ext / skills / tools / assets）。
+  ;
+  ; 这里排除两类：
+  ;   ① logs —— 运行中的日志被服务占用，且没必要打进安装包；
+  ;   ② **用户私有数据** —— settings.json（自己填的密钥）、doubao 下的
+  ;      accounts.json（登录账号）、workspaces（画布）、license.json（本机授权）、
+  ;      webview2（本机缓存）。这些交给下面的小节单独处理，**只在不存在时写入**，
+  ;      于是「覆盖安装」不会冲掉用户的密钥 / 账号 / 画布。
+  File /r /x "logs" /x "*.log" /x "settings.json" /x "accounts.json" /x "license.json" /x "webview2" /x "workspaces" "${SOURCE_DIR}\*.*"
+
+  ; ---- 用户数据：**已存在就保留**（SetOverwrite off = 目标存在时跳过，不覆盖）----
+  ; 首次安装时这些文件还不存在，于是写入出厂态（settings.json 已净化、不含任何密钥；
+  ; accounts.json 为空数组），保证新用户照样能正常启动。
+  SetOverwrite off
+  !if /FileExists "${SOURCE_DIR}\data\settings.json"
+    SetOutPath "$INSTDIR\data"
+    File "${SOURCE_DIR}\data\settings.json"
+  !endif
+  !if /FileExists "${SOURCE_DIR}\data\doubao\accounts.json"
+    SetOutPath "$INSTDIR\data\doubao"
+    File "${SOURCE_DIR}\data\doubao\accounts.json"
+  !endif
+  SetOverwrite on
+  SetOutPath "$INSTDIR"
+  CreateDirectory "$INSTDIR\data\workspaces"
 
   ; 应用图标（快捷方式与卸载项都用它）
   File "/oname=$INSTDIR\logo.ico" "${ICON_FILE}"

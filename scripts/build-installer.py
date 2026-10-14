@@ -93,6 +93,31 @@ SKIP_SUFFIX = (".bak", ".bak2", ".bak3", ".prebuild", ".orig", ".manual", ".empt
 STALE_DATA_DIRS = ("_probe-archive", "_probe-archive-remove-me", "_workspace-legacy")
 SKIP_NAMES = {"logs", "_junk-backups", ".rebrand-backup"}
 
+# 配置里所有「密钥类」字段名 —— 发行包必须一律清空（见 sanitize 里的 scrub_secrets）。
+SECRET_KEYS = ("apiKey", "uploadApiKey", "pluginMarketApiKey", "secretKey",
+               "accessKey", "accessKeySecret", "password", "token")
+
+
+def scrub_secrets(node):
+    """递归清空配置里所有密钥字段，返回被清掉的字段名（去重前）。
+
+    为什么需要：`settings.json` 里同时躺着**模型 API Key**（customProviders[*].apiKey）、
+    **素材上传密钥**（mediaProviderConfigs[*].uploadApiKey）与**插件市场密钥**等。
+    以前净化只删了项目记录，这些 key 就跟着安装包分发给了客户 —— 2026-10-14 修。
+    """
+    cleared = []
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if isinstance(value, str) and value and key in SECRET_KEYS:
+                node[key] = ""
+                cleared.append(key)
+            else:
+                cleared.extend(scrub_secrets(value))
+    elif isinstance(node, list):
+        for item in node:
+            cleared.extend(scrub_secrets(item))
+    return cleared
+
 
 def run(label, args, cwd=None):
     print("\n--- %s" % label)
@@ -283,8 +308,19 @@ def sanitize(stage):
         privacy = settings.get("privacy")
         if isinstance(privacy, dict):
             privacy["anonymousId"] = str(uuid.uuid4())
+        # ★★ 密钥：发行包绝不能带打包机的任何 key。以前这一步只清了项目记录，
+        #    于是 `uploadApiKey` 里的真实密钥就跟着安装包发出去了 —— 2026-10-14 修。
+        cleared = scrub_secrets(cfg)
+        if cleared:
+            print("  已清空密钥字段：%s" % "、".join(sorted(set(cleared))))
         with open(sp, "w", encoding="utf-8") as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
+        # 兜底：清完仍残留 sk- 形态的密钥就直接中止打包（宁可不发，也不带 key 出去）
+        leaked = re.findall(r"sk-[A-Za-z0-9]{16,}", json.dumps(cfg, ensure_ascii=False))
+        if leaked:
+            raise SystemExit(
+                "!! settings.json 仍残留疑似密钥：%s…（已中止打包）" % leaked[0][:12]
+            )
         print("  settings.json 已净化（启动器首次运行会按本机路径重建项目）")
 
     # 授权：绝不能带任何已激活信息 —— 每台电脑必须自己输入授权码。

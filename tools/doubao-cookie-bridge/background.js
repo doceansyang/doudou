@@ -32,7 +32,7 @@ async function snapshotCookies() {
 /**
  * 解析浏览器里登录的**全部**豆包账号。
  *
- * `multi_sids` 的值形如 `1234567890123456%3A7bebca…`（URL 编码的 `<uid>:<sessionid>`），
+ * `multi_sids` 的值形如 `1234567890123456%3Aabcdef…`（URL 编码的 `<uid>:<sessionid>`），
  * 多账号时是多个这样的片段拼接在一起。官方没承诺过分隔符，所以这里**不依赖分隔符**，
  * 直接全文捞出所有 `uid:sessionid` 对 —— 豆包改版也不会失配。
  */
