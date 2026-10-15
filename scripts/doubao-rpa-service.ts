@@ -274,7 +274,7 @@ async function createAccount(
     if (account) {
       let sessionId = "";
       try {
-        sessionId = (await (core ?? (await loadCore())).readProfileIdentity(account.profileDir)).sessionId;
+        sessionId = (await (core ?? (await loadCore())).readProfileIdentity(account.profileDir, account.browser)).sessionId;
       } catch { /* 读不到就按没登录处理 */ }
       if (sessionId) {
         await markLoggedIn(account.id, true);
@@ -345,6 +345,11 @@ async function syncFromBrowser(id: string): Promise<{
       //   以后点生成就用它启动，客户不用再登一次。
       browser: candidate.executable,
     });
+    // ★ 顺手把「被同步的这个浏览器」记为**全局兜底内核**（browser.json）。
+    //   账号自身记的 `browser` 是第一优先，但老账号可能没这个字段（单账号模式迁移来的），
+    //   那时就会退回全局兜底 —— 而兜底此前固定挑 Chrome，于是出现
+    //   「从 Edge 同步的账号，生成时却弹 Chrome」这种诡异现象（2026-10-15 实测定位）。
+    core.saveBrowser(candidate.executable);
     const list = result.accounts ?? [];
     await log(
       `从 ${candidate.name} 同步完成：共 ${list.length} 个账号（新增 ${result.created}、更新 ${result.updated}）`,

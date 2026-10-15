@@ -232,6 +232,17 @@ export async function pickAccount(accountType?: AccountType): Promise<PickResult
   }
 
   const usable = wanted.filter((a) => !quotaExhausted(a) && !isBusy(a.id));
+  // ★★ 「登录态确实可用」的账号优先（2026-10-15 修）。
+  //
+  //    光看 `hasLoggedIn` 不够：从**单账号模式自动迁移**来的老记录会带着
+  //    `hasLoggedIn: true`（那时还没意识到 cookie 绑定内核这件事），但 **`browser` 是空的**，
+  //    而且它的 profile 是当年那个浏览器建的。选中它之后 `launchContext` 只能退回全局兜底
+  //    （Chrome），cookie 加密密钥对不上 ⇒ 读不出登录态 ⇒ 用户看到的就是
+  //    「弹出一个浏览器、几秒后自己关掉、生成失败」，还以为是随机故障。
+  //
+  //    所以优先挑「**记着自己该用哪个内核、且那个内核还在**」的账号。
+  const ready = usable.filter((a) => a.hasLoggedIn && a.browser && existsSync(a.browser));
+  if (ready.length) return { account: ready[0] };
   if (usable.length) return { account: usable[0] };
 
   const busyCount = wanted.filter((a) => isBusy(a.id)).length;

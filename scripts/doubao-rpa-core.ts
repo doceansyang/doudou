@@ -918,12 +918,56 @@ async function openNewConversation(page: any): Promise<void> {
 /** 进入豆包「视频生成」模式：底栏模式芯片必须用坐标点击。 */
 async function openVideoCreation(page: any): Promise<void> {
   if (await inVideoMode(page)) return;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
+  // ★★ 先等底栏把模式芯片画出来（2026-10-15 实测定位）。
+  //
+  //    豆包对话页的底栏是**异步渲染**的：进页面 2~3 秒就能看到「新对话」，
+  //    但「视频生成」芯片要 10 秒左右才出现。以前这里不等，直接连点 4 次
+  //    （每次只隔 1.5 秒），5 秒后就抛「没有找到豆包「视频生成」入口」——
+  //    看起来像账号或内核的问题，其实是页面还没画完。
+  //    它和「选错账号 ⇒ 弹错浏览器」那个 bug 叠在一起，正好就是用户看到的
+  //    「弹一个浏览器、几秒后自己关掉、生成失败」。
+  try {
+    await page
+      .getByText(new RegExp(VIDEO_MODES.join("|")))
+      .first()
+      .waitFor({ state: "visible", timeout: 30000 });
+  } catch {
+    // 等不到就走下面的原逻辑：它有自己的重试和明确报错，别在这里把诊断信息吞掉。
+  }
+  // ★★ 重试要**给足时间**（2026-10-15 实测）：豆包对话页的底栏模式芯片是异步渲染的，
+  //    首页要 ~10 秒、**新建对话后要更久**（实测 12 秒仍没渲染出来）。原来只重试 4 轮
+  //    ×1.5 秒，5 秒就放弃并抛「没有找到入口」；把它误当成账号或内核问题排查了很久。
+  //    12 轮 ×2.5 秒 ≈ 30 秒，足够覆盖渲染延迟。
+  for (let attempt = 0; attempt < 12; attempt += 1) {
     if (await clickByTextInComposer(page, VIDEO_MODES)) {
       await page.waitForTimeout(4000);
       if (await inVideoMode(page)) return;
     }
-    if (attempt < 3) await page.waitForTimeout(1500);
+    await page.waitForTimeout(2500);
+  }
+  // ★ 兜底诊断（2026-10-15）：把页面尾部文本与底栏候选倒进日志，
+  //   下次一眼就能分辨是「页面还没渲染」还是「芯片文案变了 / 位置变了」，
+  //   不用再靠截图和猜。
+  try {
+    const snapshot = await page.evaluate(() => {
+      const full = document.body.innerText || "";
+      const bottom = [...document.querySelectorAll("button,[role='button'],span,div")]
+        .filter((el) => {
+          const r = (el as HTMLElement).getBoundingClientRect();
+          return r.height > 0 && r.top > window.innerHeight * 0.62; // 底栏区域
+        })
+        .map((el) => (el.textContent || "").trim())
+        .filter((t) => t && t.length <= 18);
+      return {
+        tail: full.slice(-500).replace(/\n+/g, " ▸ "),
+        bottomTexts: [...new Set(bottom)].slice(0, 30),
+        h: window.innerHeight,
+      };
+    });
+    log(`[诊断] 视口高=${snapshot.h}；底栏候选=${JSON.stringify(snapshot.bottomTexts)}`);
+    log(`[诊断] 页面尾部=${snapshot.tail}`);
+  } catch {
+    // 页面已经不可用时不打扰主流程
   }
   throw new Error("没有找到豆包「视频生成」入口，请确认页面已进入对话并展示底栏功能芯片");
 }
@@ -2062,10 +2106,15 @@ async function fetchDoubaoIdentity(context: any): Promise<{ userId: string; name
  */
 export async function readProfileIdentity(
   profileDir: string,
+  executableOverride?: string,
 ): Promise<{ sessionId: string; userId: string; name: string }> {
   const empty = { sessionId: "", userId: "", name: "" };
   try {
-    const context = await launchContext(profileDir, true);
+    // ⚠️ **必须用账号自己的内核**打开这个 profile（2026-10-15 修）。
+    //    cookie 的加密密钥绑定具体浏览器：拿全局兜底（默认 Chrome）去开 Edge 建的 profile，
+    //    不但读不出登录态，还可能把 profile 的加密绑定写坏 —— 实测同步 Edge 账号时
+    //    日志里冒出「浏览器内核：Chrome」，就是这个默认值漏下来了。
+    const context = await launchContext(profileDir, true, executableOverride);
     try {
       const cookies = await context.cookies(ACCOUNT_PLATFORMS.doubao.url);
       const sessionId = String((cookies as any[]).find((c) => c.name === "sessionid")?.value ?? "").trim();
@@ -2210,7 +2259,9 @@ export async function importCookies(request: {
       (a) => a.accountType === type && !a.doubaoUid && !a.sessionFingerprint,
     );
     for (const blank of blanks) {
-      const profile = await readProfileIdentity(blank.profileDir);
+      // ⚠️ 用**这个老账号自己记着的内核**去读（空则退回全局兜底 —— 而兜底现在会被
+      //    `browsers/sync` 写成「用户同步时用的那个浏览器」，不会再莫名变成 Chrome）。
+      const profile = await readProfileIdentity(blank.profileDir, blank.browser);
       if (!profile.sessionId) continue;
       const hit = listed.find((item) => item.sessionId === profile.sessionId);
       if (!hit) continue;
