@@ -671,6 +671,15 @@ async function launchContext(profileDir: string = PROFILE_ROOT, headless = false
     headless,
     acceptDownloads: true,
     viewport: { width: 1440, height: 900 },
+    // ★ 去掉 Playwright 默认塞进来的 `--no-sandbox`（2026-10-15 实测）。
+    //
+    //   Playwright 的 coreBundle 会无条件 `chromeArguments.push("--no-sandbox")`，浏览器
+    //   顶部因此挂一条黄色警告条「You're using an unsupported command-line flag:
+    //   --no-sandbox. This poses stability and security risks.」—— 既碍眼，更是**极明显
+    //   的自动化特征**。用户截图里就有这条，而豆包正是据此弹「人工安全验证」，
+    //   验证前后还会把页面掐掉（用户描述的现象就是「一直不工作然后就关了」）。
+    //   去掉后浏览器用自身默认的沙箱策略，外观与真实用户一致。
+    ignoreDefaultArgs: ["--no-sandbox"],
     // 无头时不带窗口参数：位置/尺寸没意义，窗口标记也只会误导后续的窗口识别。
     args: !headless && process.platform === "win32"
       ? ["--window-position=80,60", "--window-size=1440,900", RPA_WINDOW_MARK]
@@ -836,11 +845,28 @@ async function inVideoMode(page: any): Promise<boolean> {
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      return Array.from(document.querySelectorAll("button, [role='button']"))
-        .filter(visible)
-        .filter((el) => el.getBoundingClientRect().y > minY)
-        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-        .join(" | ");
+      // ★★ 不要把范围限死在 `button / [role=button]` 上（2026-10-15 修）。
+      //    底栏那行「模型 Seedance 2.0 Mini」并不挂在按钮上，是普通 div/span ——
+      //    只扫按钮会让这个判定**永远为 false**：明明已经停在视频模式（用户截图里
+      //    底栏写着「+ ｜ 视频生成 × ｜ 模型 Seedance 2.0 Mini ｜ 自动 · 10s ｜ 🎤」），
+      //    代码却以为没进去，于是反复点「视频生成」把模式切来切去，最后抛
+      //    「没有找到豆包「视频生成」入口」——用户看到的就是「停在那不动 / 几秒后关掉」。
+      //    这里改成扫底栏区域的**所有元素**，并只取元素**自身的文本节点**，
+      //    避免父子容器重复拼接。
+      const parts: string[] = [];
+      const nodes = document.querySelectorAll("button, [role='button'], [role='tab'], span, div, p");
+      for (const el of Array.from(nodes)) {
+        if (!visible(el)) continue;
+        if (el.getBoundingClientRect().top <= minY) continue;
+        const own = Array.from(el.childNodes)
+          .filter((node) => node.nodeType === 3)
+          .map((node) => node.textContent || "")
+          .join("");
+        const value = own.replace(/\s+/g, " ").trim();
+        if (value) parts.push(value);
+        if (parts.length > 400) break;
+      }
+      return parts.join(" | ");
     }, COMPOSER_Y)
     .catch(() => "");
   return RE_SEEDANCE.test(text);
@@ -964,10 +990,19 @@ async function openVideoCreation(page: any): Promise<void> {
         h: window.innerHeight,
       };
     });
-    log(`[诊断] 视口高=${snapshot.h}；底栏候选=${JSON.stringify(snapshot.bottomTexts)}`);
+    log(`[诊断] URL=${page.url()}  视口高=${snapshot.h}`);
+    log(`[诊断] 底栏候选=${JSON.stringify(snapshot.bottomTexts)}`);
     log(`[诊断] 页面尾部=${snapshot.tail}`);
   } catch {
     // 页面已经不可用时不打扰主流程
+  }
+  // ★ 失败瞬间存一张截图：页面到底长什么样一眼就看出来，比反复翻文本快得多。
+  try {
+    const shot = resolve(process.cwd(), "assets", `rpa-fail-${Date.now()}.png`);
+    await page.screenshot({ path: shot });
+    log(`[诊断] 失败截图：${shot}`);
+  } catch {
+    // 截图失败不影响主流程
   }
   throw new Error("没有找到豆包「视频生成」入口，请确认页面已进入对话并展示底栏功能芯片");
 }
