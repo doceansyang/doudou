@@ -671,14 +671,11 @@ async function launchContext(profileDir: string = PROFILE_ROOT, headless = false
     headless,
     acceptDownloads: true,
     viewport: { width: 1440, height: 900 },
-    // ★ 去掉 Playwright 默认塞进来的 `--no-sandbox`（2026-10-15 实测）。
-    //
-    //   Playwright 的 coreBundle 会无条件 `chromeArguments.push("--no-sandbox")`，浏览器
-    //   顶部因此挂一条黄色警告条「You're using an unsupported command-line flag:
-    //   --no-sandbox. This poses stability and security risks.」—— 既碍眼，更是**极明显
-    //   的自动化特征**。用户截图里就有这条，而豆包正是据此弹「人工安全验证」，
-    //   验证前后还会把页面掐掉（用户描述的现象就是「一直不工作然后就关了」）。
-    //   去掉后浏览器用自身默认的沙箱策略，外观与真实用户一致。
+    // ★ 必须去掉 Playwright 默认塞的 `--no-sandbox`（2026-10-16 实测必需）。
+    //   coreBundle 无条件 `push("--no-sandbox")` ⇒ 浏览器顶部出现
+    //   「unsupported command-line flag」黄条，这是极明显的自动化特征，
+    //   豆包随即触发风控并**把页面掐掉** —— 现象就是「弹窗豆包几秒后自动关闭、
+    //   文字和图片都还没输入就报错」。加回这一行后风控不再触发。
     ignoreDefaultArgs: ["--no-sandbox"],
     // 无头时不带窗口参数：位置/尺寸没意义，窗口标记也只会误导后续的窗口识别。
     args: !headless && process.platform === "win32"
@@ -845,28 +842,11 @@ async function inVideoMode(page: any): Promise<boolean> {
         const rect = el.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       };
-      // ★★ 不要把范围限死在 `button / [role=button]` 上（2026-10-15 修）。
-      //    底栏那行「模型 Seedance 2.0 Mini」并不挂在按钮上，是普通 div/span ——
-      //    只扫按钮会让这个判定**永远为 false**：明明已经停在视频模式（用户截图里
-      //    底栏写着「+ ｜ 视频生成 × ｜ 模型 Seedance 2.0 Mini ｜ 自动 · 10s ｜ 🎤」），
-      //    代码却以为没进去，于是反复点「视频生成」把模式切来切去，最后抛
-      //    「没有找到豆包「视频生成」入口」——用户看到的就是「停在那不动 / 几秒后关掉」。
-      //    这里改成扫底栏区域的**所有元素**，并只取元素**自身的文本节点**，
-      //    避免父子容器重复拼接。
-      const parts: string[] = [];
-      const nodes = document.querySelectorAll("button, [role='button'], [role='tab'], span, div, p");
-      for (const el of Array.from(nodes)) {
-        if (!visible(el)) continue;
-        if (el.getBoundingClientRect().top <= minY) continue;
-        const own = Array.from(el.childNodes)
-          .filter((node) => node.nodeType === 3)
-          .map((node) => node.textContent || "")
-          .join("");
-        const value = own.replace(/\s+/g, " ").trim();
-        if (value) parts.push(value);
-        if (parts.length > 400) break;
-      }
-      return parts.join(" | ");
+      return Array.from(document.querySelectorAll("button, [role='button']"))
+        .filter(visible)
+        .filter((el) => el.getBoundingClientRect().y > minY)
+        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+        .join(" | ");
     }, COMPOSER_Y)
     .catch(() => "");
   return RE_SEEDANCE.test(text);
@@ -944,65 +924,12 @@ async function openNewConversation(page: any): Promise<void> {
 /** 进入豆包「视频生成」模式：底栏模式芯片必须用坐标点击。 */
 async function openVideoCreation(page: any): Promise<void> {
   if (await inVideoMode(page)) return;
-  // ★★ 先等底栏把模式芯片画出来（2026-10-15 实测定位）。
-  //
-  //    豆包对话页的底栏是**异步渲染**的：进页面 2~3 秒就能看到「新对话」，
-  //    但「视频生成」芯片要 10 秒左右才出现。以前这里不等，直接连点 4 次
-  //    （每次只隔 1.5 秒），5 秒后就抛「没有找到豆包「视频生成」入口」——
-  //    看起来像账号或内核的问题，其实是页面还没画完。
-  //    它和「选错账号 ⇒ 弹错浏览器」那个 bug 叠在一起，正好就是用户看到的
-  //    「弹一个浏览器、几秒后自己关掉、生成失败」。
-  try {
-    await page
-      .getByText(new RegExp(VIDEO_MODES.join("|")))
-      .first()
-      .waitFor({ state: "visible", timeout: 30000 });
-  } catch {
-    // 等不到就走下面的原逻辑：它有自己的重试和明确报错，别在这里把诊断信息吞掉。
-  }
-  // ★★ 重试要**给足时间**（2026-10-15 实测）：豆包对话页的底栏模式芯片是异步渲染的，
-  //    首页要 ~10 秒、**新建对话后要更久**（实测 12 秒仍没渲染出来）。原来只重试 4 轮
-  //    ×1.5 秒，5 秒就放弃并抛「没有找到入口」；把它误当成账号或内核问题排查了很久。
-  //    12 轮 ×2.5 秒 ≈ 30 秒，足够覆盖渲染延迟。
-  for (let attempt = 0; attempt < 12; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     if (await clickByTextInComposer(page, VIDEO_MODES)) {
       await page.waitForTimeout(4000);
       if (await inVideoMode(page)) return;
     }
-    await page.waitForTimeout(2500);
-  }
-  // ★ 兜底诊断（2026-10-15）：把页面尾部文本与底栏候选倒进日志，
-  //   下次一眼就能分辨是「页面还没渲染」还是「芯片文案变了 / 位置变了」，
-  //   不用再靠截图和猜。
-  try {
-    const snapshot = await page.evaluate(() => {
-      const full = document.body.innerText || "";
-      const bottom = [...document.querySelectorAll("button,[role='button'],span,div")]
-        .filter((el) => {
-          const r = (el as HTMLElement).getBoundingClientRect();
-          return r.height > 0 && r.top > window.innerHeight * 0.62; // 底栏区域
-        })
-        .map((el) => (el.textContent || "").trim())
-        .filter((t) => t && t.length <= 18);
-      return {
-        tail: full.slice(-500).replace(/\n+/g, " ▸ "),
-        bottomTexts: [...new Set(bottom)].slice(0, 30),
-        h: window.innerHeight,
-      };
-    });
-    log(`[诊断] URL=${page.url()}  视口高=${snapshot.h}`);
-    log(`[诊断] 底栏候选=${JSON.stringify(snapshot.bottomTexts)}`);
-    log(`[诊断] 页面尾部=${snapshot.tail}`);
-  } catch {
-    // 页面已经不可用时不打扰主流程
-  }
-  // ★ 失败瞬间存一张截图：页面到底长什么样一眼就看出来，比反复翻文本快得多。
-  try {
-    const shot = resolve(process.cwd(), "assets", `rpa-fail-${Date.now()}.png`);
-    await page.screenshot({ path: shot });
-    log(`[诊断] 失败截图：${shot}`);
-  } catch {
-    // 截图失败不影响主流程
+    if (attempt < 3) await page.waitForTimeout(1500);
   }
   throw new Error("没有找到豆包「视频生成」入口，请确认页面已进入对话并展示底栏功能芯片");
 }
@@ -1239,6 +1166,54 @@ async function configureDolaVideo(page: any, ratio: string, duration: number): P
  * 页面里有一个隐藏的 input[type=file]（accept 含图片、multiple=true），
  * 直接 setInputFiles 最稳，不依赖系统文件选择框。
  */
+/** 把文件塞进页面上现成的 input[type=file]（可能有多个，从后往前逐个试）。 */
+async function setFilesOnInputs(page: any, files: any[]): Promise<boolean> {
+  const inputs = page.locator('input[type="file"]');
+  const total = await inputs.count();
+  for (let index = total - 1; index >= 0; index -= 1) {
+    const control = inputs.nth(index);
+    try {
+      const accept = String((await control.getAttribute("accept")) || "").toLowerCase();
+      if (accept && !/image|\.png|\.jpg|\.jpeg|\.webp|\.apng/.test(accept)) continue;
+      const multiple = (await control.getAttribute("multiple")) !== null;
+      await control.setInputFiles(multiple ? files : [files[0]], { timeout: 20000 });
+      await page.waitForTimeout(Math.max(3000, files.length * 1500));
+      return true;
+    } catch { /* 该 input 不可用，换下一个 */ }
+  }
+  return false;
+}
+
+/** 往输入框粘贴图片（实测可行，且不需要点任何按钮）。返回是否真的进去了。 */
+async function pasteImages(page: any, files: any[]): Promise<boolean> {
+  const box = page.locator('[contenteditable="true"]:visible, textarea:visible').last();
+  if (!(await box.count())) return false;
+  await box.click({ timeout: 5000 }).catch(() => undefined);
+  await page.waitForTimeout(600);
+  // ⚠️ buffer 是 **Node Buffer**：`String(buffer)` 得到的是乱码（`1,2,3...`），
+  //    必须显式 `toString("base64")`，否则粘贴进去的是坏数据、页面不认（2026-10-16 踩过）。
+  const payload = files.map((f) => ({
+    name: f.name,
+    mimeType: f.mimeType,
+    b64: (f.buffer && typeof f.buffer.toString === "function" ? f.buffer.toString("base64") : String(f.buffer)).replace(/^data:[^,]+,/, ""),
+  }));
+  await page
+    .evaluate(async (items) => {
+      const dt = new DataTransfer();
+      for (const it of items) {
+        const res = await fetch("data:" + it.mimeType + ";base64," + it.b64);
+        const blob = await res.blob();
+        dt.items.add(new File([blob], it.name, { type: it.mimeType }));
+      }
+      const target = document.querySelector('[contenteditable="true"], textarea');
+      if (target && (target as HTMLElement).focus) (target as HTMLElement).focus();
+      target?.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, payload)
+    .catch(() => undefined);
+  await page.waitForTimeout(3000);
+  return page.evaluate(() => document.querySelectorAll('img[src^="blob:"]').length > 0).catch(() => false);
+}
+
 async function uploadImages(page: any, files: any[]): Promise<void> {
   if (!files.length) return;
 
@@ -1272,6 +1247,48 @@ async function uploadImages(page: any, files: any[]): Promise<void> {
       return;
     } catch { /* 继续 */ }
   }
+  // ★★★ 主路径：**往输入框粘贴图片**（2026-10-16 实测可行，也是"素材直接进去"的真相）。
+  //    实测链路：进视频模式 → 聚焦输入框 → dispatch ClipboardEvent('paste')（带 image File）
+  //    → 页面出现 `img[src^="blob:"]`，**全程不点任何按钮**，因此也不可能误点到
+  //    模式菜单里的「图像生成」把模式切到图片。
+  //    （页面此时 file input 数 = 0 —— CDTV 当年依赖的那个 input，豆包新版不再预置，
+  //      所以 ① 那条老路在现在的页面上必然失败，这不是我们代码的问题。）
+  if (await pasteImages(page, files)) {
+    log(`已通过粘贴上传 ${files.length} 张参考图`);
+    return;
+  }
+  // ★ 失败诊断（2026-10-16）：**只记录事实，绝不在这里做任何猜测性点击**。
+  //    把底栏所有元素的 testid / 文案 / 坐标 + file input 数量 + 截图落到日志，
+  //    下一次就能直接看出豆包把上传入口放在哪，而不是靠猜。
+  try {
+    const dump = await page.evaluate((minY: number) => {
+      const visible = (el: Element) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const rows: string[] = [];
+      // ⚠️ 必须**排除左侧栏**（x<300）：侧栏很长且全是可点元素，不排掉的话它会把
+      //    采样上限占满，真正的底栏/菜单一个都看不到（2026-10-16 连续两次踩到）。
+      //    同时把 span/div 也纳入：菜单项「上传素材」不是 button。
+      for (const el of Array.from(document.querySelectorAll(
+        "button, [role='button'], [data-testid], [class*='upload' i], [class*='attach' i], span, div",
+      ))) {
+        const r = el.getBoundingClientRect();
+        if (!visible(el) || r.top <= minY || r.left < 300) continue;
+        const text = (el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 14);
+        rows.push(`${Math.round(r.x)},${Math.round(r.y)}|${el.getAttribute("data-testid") || "-"}|${text}`);
+        if (rows.length > 24) break;
+      }
+      return { rows, fileInputs: document.querySelectorAll("input[type=file]").length, url: location.href };
+    }, COMPOSER_Y);
+    log(`[上传诊断] fileInput=${dump.fileInputs} url=${dump.url}`);
+    log(`[上传诊断] 底栏元素=${JSON.stringify(dump.rows)}`);
+  } catch {
+    // 诊断失败不影响主流程
+  }
+  try {
+    await page.screenshot({ path: resolve(process.cwd(), "assets", "upload-fail.png") }).catch(() => undefined);
+  } catch { /* 忽略 */ }
   throw new Error("没有找到图片上传控件；请确认当前已进入豆包视频生成模式");
 }
 
@@ -2141,15 +2158,10 @@ async function fetchDoubaoIdentity(context: any): Promise<{ userId: string; name
  */
 export async function readProfileIdentity(
   profileDir: string,
-  executableOverride?: string,
 ): Promise<{ sessionId: string; userId: string; name: string }> {
   const empty = { sessionId: "", userId: "", name: "" };
   try {
-    // ⚠️ **必须用账号自己的内核**打开这个 profile（2026-10-15 修）。
-    //    cookie 的加密密钥绑定具体浏览器：拿全局兜底（默认 Chrome）去开 Edge 建的 profile，
-    //    不但读不出登录态，还可能把 profile 的加密绑定写坏 —— 实测同步 Edge 账号时
-    //    日志里冒出「浏览器内核：Chrome」，就是这个默认值漏下来了。
-    const context = await launchContext(profileDir, true, executableOverride);
+    const context = await launchContext(profileDir, true);
     try {
       const cookies = await context.cookies(ACCOUNT_PLATFORMS.doubao.url);
       const sessionId = String((cookies as any[]).find((c) => c.name === "sessionid")?.value ?? "").trim();
@@ -2294,9 +2306,7 @@ export async function importCookies(request: {
       (a) => a.accountType === type && !a.doubaoUid && !a.sessionFingerprint,
     );
     for (const blank of blanks) {
-      // ⚠️ 用**这个老账号自己记着的内核**去读（空则退回全局兜底 —— 而兜底现在会被
-      //    `browsers/sync` 写成「用户同步时用的那个浏览器」，不会再莫名变成 Chrome）。
-      const profile = await readProfileIdentity(blank.profileDir, blank.browser);
+      const profile = await readProfileIdentity(blank.profileDir);
       if (!profile.sessionId) continue;
       const hit = listed.find((item) => item.sessionId === profile.sessionId);
       if (!hit) continue;
